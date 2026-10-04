@@ -20,7 +20,7 @@ Claude Code / Codex のセッションを X のタイムライン風に表示す
 - 画面の振る舞いを足す時は、`e2e/tests/` の E2E テストでその画面を操作し、`testInfo.outputPath(...)` にスクリーンショットを保存する。そのスクリーンショットが変更の証拠になる
 - CI には本物のセッションのログが無い。テストと E2E は、ログのルートを差し替える環境変数を通して `fixtures/` の合成セッションを読む (`.claude/rules/synthetic-fixtures.md`)
 - テストではなく手で画面を操作して確かめたい時は、GitHub Actions の runner 上の Chromium を操作する `webtunnel` skill を使う。`WEBTUNNEL_REPO=bannzai/agent-timeline` でセッションを起動すると、runner が `npm run start:fixtures` で `fixtures/` の合成セッションを表示したアプリを起動する (`.github/workflows/browser-session.yml`)。public リポジトリでは録画とスクリーンショットの artifact が公開されるため、本物のセッションを表示しない
-- 本物のセッションへの返信には tmux と動いているエージェントが要り、CI には無い。CI では `PATH` に置いた偽の `tmux` で確認し、本物のセッションでの確認は「ユーザー作業の一覧」issue に載せた人間の確認で行う
+- 本物のセッションへの返信には tmux と動いているエージェントが要り、CI には無い。CI では環境変数 `AGENT_TIMELINE_TMUX`・`AGENT_TIMELINE_PS` で差し替えた偽の `tmux` と `ps` (`fixtures/fake-commands/`) で確認し、本物のセッションでの確認は「ユーザー作業の一覧」issue に載せた人間の確認で行う
 
 <!-- ai-review-config begin -->
 <!--
