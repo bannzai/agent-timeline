@@ -150,6 +150,46 @@ test("スレッドを表示中にそのセッションへ追記すると末尾�
   await page.screenshot({ path: testInfo.outputPath("live-thread-appended.png"), fullPage: true });
 });
 
+test("スレッドの読み込みが知らせの間隔より遅くても、追記が続く間に表示を更新する", async ({
+  page,
+}, testInfo) => {
+  const response = await page.request.get(`/api${claudeCartThreadPath}/posts`);
+  expect(response.status()).toBe(200);
+  const { posts: fixtureThreadPosts } = (await response.json()) as { posts: Post[] };
+  // スレッドの API の応答を、サーバーの見張りの間隔 (1 秒) より遅らせる。
+  await page.route(`**/api${claudeCartThreadPath}/posts`, async (route) => {
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    // 待つ間に画面が読み込みを止めた時は、続ける先が無い。
+    await route.continue().catch(() => {});
+  });
+  // 見張りの間隔より短い間隔で追記し続け、知らせが読み込みの最中に届き続ける状態にする。
+  let appendedLineCount = 0;
+  const appendTimer = setInterval(() => {
+    appendedLineCount += 1;
+    appendLogLines(claudeCodeLogPath(testInfo, "-home-dev-acme-shop", claudeCart), [
+      claudeCodeLogLine(
+        "assistant",
+        `2026-10-02T10:30:${String(20 + appendedLineCount).padStart(2, "0")}.000Z`,
+        "/home/dev/acme-shop",
+        `追記の ${appendedLineCount} 行目`,
+      ),
+    ]);
+  }, 400);
+  try {
+    await page.goto(claudeCartThreadPath);
+    // 追記が続いている間に、読み込みが終わって発言が並ぶ。
+    await expect(page.getByTestId("thread-post").first()).toBeVisible({ timeout: 8_000 });
+  } finally {
+    clearInterval(appendTimer);
+  }
+
+  // 追記が止まった後は、最後の追記まで並ぶ。
+  await expect(page.getByTestId("thread-post")).toHaveCount(
+    fixtureThreadPosts.length + appendedLineCount,
+    { timeout: 10_000 },
+  );
+});
+
 test("新しいセッションのファイルを足すとその投稿がタイムラインに現れる", async ({
   page,
 }, testInfo) => {

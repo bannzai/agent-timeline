@@ -29,15 +29,22 @@ export function Thread({
   onBack: () => void;
 }) {
   const [threadState, setThreadState] = useState<ThreadState>({ status: "loading" });
-  // 直近に始めた読み込みを止めるためのもの。後から始めた読み込みの結果を、先に始めた読み込みの結果で上書きしないため。
+  // 読み込み中の読み込みを、セッションが替わった時と画面を閉じた時に止めるためのもの。読み込んでいない間は null。
   const loadControllerRef = useRef<AbortController | null>(null);
+  // 読み込み中に loadThread が呼ばれたか。
+  const reloadRequestedRef = useRef(false);
 
+  // 終わった後の読み直しで自分を呼ぶため、型を書いて推論が自分自身を参照しないようにする。
   /**
-   * スレッドを読み、読めた投稿で表示を置き換える。
-   * 投稿を表示している時に読み込みに失敗した時は、表示中の投稿を残す。
+   * スレッドを読み、読めた投稿で表示を置き換える。投稿を表示している時に読み込みに失敗した時は、表示中の投稿を残す。
+   * 読み込み中に呼ばれた時は、今の読み込みを止めずに終わった後で 1 度だけ読み直す。読み込みが知らせの間隔より
+   * 長くかかる時に、知らせのたびに読み込みを止めて表示が更新されなくなるのを防ぐ。
    */
-  const loadThread = useCallback(() => {
-    loadControllerRef.current?.abort();
+  const loadThread: () => void = useCallback(() => {
+    if (loadControllerRef.current !== null) {
+      reloadRequestedRef.current = true;
+      return;
+    }
     const controller = new AbortController();
     loadControllerRef.current = controller;
     fetch(`/api/sessions/${agent}/${encodeURIComponent(sessionId)}/posts`, {
@@ -60,13 +67,28 @@ export function Thread({
             previousState.status === "loaded" ? previousState : { status: "error" },
           );
         }
+      })
+      .finally(() => {
+        // 止めた読み込みの後始末は、止めた側 (下の useEffect の後始末) が済ませている。
+        if (controller.signal.aborted) {
+          return;
+        }
+        loadControllerRef.current = null;
+        if (reloadRequestedRef.current) {
+          reloadRequestedRef.current = false;
+          loadThread();
+        }
       });
   }, [agent, sessionId]);
 
   useEffect(() => {
     setThreadState({ status: "loading" });
     loadThread();
-    return () => loadControllerRef.current?.abort();
+    return () => {
+      loadControllerRef.current?.abort();
+      loadControllerRef.current = null;
+      reloadRequestedRef.current = false;
+    };
   }, [loadThread]);
 
   // このセッションのログが追記された時と、知らせにつながった時に読み直し、増えた発言を末尾に並べる。
