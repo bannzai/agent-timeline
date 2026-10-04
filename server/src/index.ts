@@ -1,11 +1,12 @@
 import { serve } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
 import { createApp } from "./app.js";
+import { logRootsFromEnv } from "./timeline.js";
 
 // 7878 は、よく使われる dev サーバーのポート (3000・5173・8080) と重ならないため。
 const port = Number(process.env.AGENT_TIMELINE_PORT ?? 7878);
 
-const app = createApp();
+const app = createApp(logRootsFromEnv(process.env));
 // ビルド済みの画面。`npm start` はリポジトリのルートで実行される。
 app.use("/*", serveStatic({ root: "./dist/web" }));
 
