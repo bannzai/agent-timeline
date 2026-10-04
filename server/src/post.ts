@@ -21,7 +21,10 @@ export interface Post {
   session: PostSession;
   author: PostAuthor;
   text: string;
-  /** author が tool の投稿の、ツールの結果の先頭。tool でない投稿と、結果がまだログに無い投稿は null。 */
+  /**
+   * author が tool の投稿の、ツールの結果の先頭。tool でない投稿、結果がまだログに無い投稿、
+   * 文を持たない結果 (画像だけの結果など) の投稿は null。
+   */
   toolResult: string | null;
   /** 発言の日時。UTC の ISO 8601 (`Date.prototype.toISOString` の形) で、文字列の大小が日時の前後と一致する。 */
   timestamp: string;
@@ -96,20 +99,17 @@ export function toolCallText(toolName: string, toolInput: string): string {
 
 /**
  * ツールの結果を、投稿の toolResult の形にする。結果は文字列か、`text` を持つ要素の配列で書かれる。
- * 文を持たない結果 (画像だけの結果など) は空の文字列を返す。
+ * 文を持たない結果 (画像だけの結果・知らない形の結果など) は null を返す。
  */
-export function toolResultText(toolOutput: unknown): string {
+export function toolResultText(toolOutput: unknown): string | null {
   if (typeof toolOutput === "string") {
-    return toolOutput.slice(0, toolResultTextMaxLength);
+    return toolOutput === "" ? null : toolOutput.slice(0, toolResultTextMaxLength);
   }
   if (!Array.isArray(toolOutput)) {
-    return "";
+    return null;
   }
-  return toolOutput
-    .map(contentItemText)
-    .filter((itemText) => itemText !== null)
-    .join("\n")
-    .slice(0, toolResultTextMaxLength);
+  const itemTexts = toolOutput.map(contentItemText).filter((itemText) => itemText !== null);
+  return itemTexts.length === 0 ? null : itemTexts.join("\n").slice(0, toolResultTextMaxLength);
 }
 
 /** 発言やツールの結果の配列の要素 (`{ type, text }`) の文。文を持たない要素は null を返す。 */

@@ -144,7 +144,7 @@ export function ToolCallDetails({ post }: { post: Post }) {
           </pre>
           <div className="tool-detail-label">結果</div>
           <pre className="tool-detail-body" data-testid="tool-result">
-            {post.toolResult ?? "結果はまだありません"}
+            {post.toolResult ?? "結果の文はありません"}
           </pre>
         </div>
       )}

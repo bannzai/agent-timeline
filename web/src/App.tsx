@@ -27,6 +27,13 @@ export function App() {
   useEffect(() => {
     // 戻った時のスクロールの位置は、隠して残したタイムラインに合わせてこの画面が戻す。
     window.history.scrollRestoration = "manual";
+    // スレッドとして読めない URL (`/sessions/gemini/abc` など) はタイムラインを出すため、URL もタイムラインの `/` に直す。
+    if (
+      routeFromPath(window.location.pathname).screen === "home" &&
+      window.location.pathname !== "/"
+    ) {
+      window.history.replaceState(null, "", "/");
+    }
     /** ブラウザの戻る・進むで変わった URL を、画面の場所に写す。 */
     const onPopState = () => setRoute(routeFromPath(window.location.pathname));
     window.addEventListener("popstate", onPopState);
