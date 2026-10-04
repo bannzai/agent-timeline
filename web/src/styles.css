@@ -175,6 +175,31 @@ button {
   height: 20px;
 }
 
+/* 新着の知らせ。X と同じく見出しの下に浮かせて出す。高さを持たないため、出ても読んでいる位置が動かない。 */
+.new-posts-bar {
+  position: sticky;
+  top: 66px;
+  z-index: 1;
+  display: flex;
+  justify-content: center;
+  height: 0;
+}
+
+.new-posts-button {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  height: 36px;
+  padding: 0 16px;
+  border: none;
+  border-radius: 9999px;
+  background: var(--accent);
+  color: #ffffff;
+  font-weight: 700;
+  box-shadow: 0 0 12px rgba(0, 0, 0, 0.15);
+  cursor: pointer;
+}
+
 /* 投稿 */
 .post {
   padding: 12px 16px;

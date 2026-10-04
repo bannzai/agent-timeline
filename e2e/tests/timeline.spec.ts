@@ -87,6 +87,11 @@ test("下まで読むと続きを読み込む", async ({ page }) => {
   // fixture の投稿は 1 ページに収まるため、1 ページの件数を減らして続きの読み込みを起こす。
   await page.route("**/api/posts*", async (route) => {
     const url = new URL(route.request().url());
+    // limit を付けた読み込みは、ページの読み込みではなく新着を探す読み込み (web/src/Timeline.tsx) のため数えない。
+    if (url.searchParams.has("limit")) {
+      await route.continue();
+      return;
+    }
     requestedCursors.push(url.searchParams.get("cursor"));
     url.searchParams.set("limit", "5");
     await route.continue({ url: url.toString() });

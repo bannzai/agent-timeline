@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentKind, Post } from "../../server/src/post.js";
 import { projectName } from "./format";
+import { useLogChanges } from "./log-changes";
 import {
   AgentAvatar,
   HumanContext,
@@ -28,10 +29,24 @@ export function Thread({
   onBack: () => void;
 }) {
   const [threadState, setThreadState] = useState<ThreadState>({ status: "loading" });
+  // 読み込み中の読み込みを、セッションが替わった時と画面を閉じた時に止めるためのもの。読み込んでいない間は null。
+  const loadControllerRef = useRef<AbortController | null>(null);
+  // 読み込み中に loadThread が呼ばれたか。
+  const reloadRequestedRef = useRef(false);
 
-  useEffect(() => {
+  /**
+   * スレッドを読み、読めた投稿で表示を置き換える。投稿を表示している時に読み込みに失敗した時は、表示中の投稿を残す。
+   * 読み込み中に呼ばれた時は、今の読み込みを止めずに終わった後で 1 度だけ読み直す。読み込みが知らせの間隔より
+   * 長くかかる時に、知らせのたびに読み込みを止めて表示が更新されなくなるのを防ぐ。
+   * 型を書くのは、終わった後の読み直しで自分を呼び、型の推論が自分自身を参照するため。
+   */
+  const loadThread: () => void = useCallback(() => {
+    if (loadControllerRef.current !== null) {
+      reloadRequestedRef.current = true;
+      return;
+    }
     const controller = new AbortController();
-    setThreadState({ status: "loading" });
+    loadControllerRef.current = controller;
     fetch(`/api/sessions/${agent}/${encodeURIComponent(sessionId)}/posts`, {
       signal: controller.signal,
     })
@@ -48,11 +63,43 @@ export function Thread({
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setThreadState({ status: "error" });
+          setThreadState((previousState) =>
+            previousState.status === "loaded" ? previousState : { status: "error" },
+          );
+        }
+      })
+      .finally(() => {
+        // 止めた読み込みの後始末は、止めた側 (下の useEffect の後始末) が済ませている。
+        if (controller.signal.aborted) {
+          return;
+        }
+        loadControllerRef.current = null;
+        if (reloadRequestedRef.current) {
+          reloadRequestedRef.current = false;
+          loadThread();
         }
       });
-    return () => controller.abort();
   }, [agent, sessionId]);
+
+  useEffect(() => {
+    setThreadState({ status: "loading" });
+    loadThread();
+    return () => {
+      loadControllerRef.current?.abort();
+      loadControllerRef.current = null;
+      reloadRequestedRef.current = false;
+    };
+  }, [loadThread]);
+
+  // このセッションのログが追記された時と、知らせにつながった時に読み直し、増えた発言を末尾に並べる。
+  useLogChanges((changedSessions) => {
+    if (
+      changedSessions === null ||
+      changedSessions.some((session) => session.agent === agent && session.sessionId === sessionId)
+    ) {
+      loadThread();
+    }
+  }, true);
 
   const firstPost = threadState.status === "loaded" ? threadState.posts[0] : undefined;
   // 相対時刻の基準。読み込むたびに描き直すため、描画の時点の時刻を使う。

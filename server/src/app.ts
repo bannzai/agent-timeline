@@ -1,16 +1,21 @@
 import { Hono } from "hono";
+import { streamSSE } from "hono/streaming";
+import { createLogWatcher } from "./log-watcher.js";
+import { type SessionsChangedEvent, timelineMaxLimit } from "./post.js";
 import { decodeTimelineCursor, type LogRoots, readThread, readTimeline } from "./timeline.js";
 
 // タイムラインの 1 画面に並ぶ件数より多く、1 回の応答でログを読む量を抑えられる件数にするため。
 const timelineDefaultLimit = 50;
-// 画面が一度に描く件数として十分で、1 回の応答が大きくなりすぎない上限にするため。
-const timelineMaxLimit = 200;
 // サーバーは 127.0.0.1 だけで待ち受けるため、正しいリクエストの Host はこのどちらかになる。
 const localHostnames = new Set(["127.0.0.1", "localhost"]);
+// 発言が 1 秒ほどでタイムラインに流れ、流し見て遅れを感じない間隔にするため。
+// 1 回に見るのはファイルの一覧と大きさ・最終更新の日時だけで、ファイルの中身は読まない。
+const logPollIntervalMs = 1000;
 
 /** agent-timeline の HTTP API を返す。静的ファイルの配信と待ち受けを含まないため、テストから直接呼べる。 */
 export function createApp(logRoots: LogRoots): Hono {
   const app = new Hono();
+  const logWatcher = createLogWatcher(logRoots, logPollIntervalMs);
 
   // 会話のログを返すため、Host がこのマシンでないリクエストは拒否する。ブラウザで開いた別のサイトが
   // 自分のドメインを 127.0.0.1 に向け直して (DNS rebinding) 同じオリジンとして読むのを防ぐ (documents/PROJECT.md「制約」)。
@@ -51,6 +56,26 @@ export function createApp(logRoots: LogRoots): Hono {
     }
     return c.json({ posts });
   });
+
+  // ログの変化を Server-Sent Events で知らせる。見張りの基準ができた時に `ready` を送り、その後は
+  // ログが追記されたか新しく現れたセッションを `sessions-changed` で送る。画面は ready を受けたら読み直し、
+  // つながる前とつながっていない間の変化を拾う。
+  app.get("/api/events", (c) =>
+    streamSSE(c, async (stream) => {
+      const aborted = new Promise<void>((resolve) => stream.onAbort(resolve));
+      const unsubscribe = await logWatcher.subscribe((changedSessions) => {
+        void stream.writeSSE({
+          event: "sessions-changed",
+          data: JSON.stringify({ sessions: changedSessions } satisfies SessionsChangedEvent),
+        });
+      });
+      // ブラウザは data が空のイベントを届けないため、空のオブジェクトを入れる。
+      await stream.writeSSE({ event: "ready", data: "{}" });
+      // コールバックが終わるとつながりが閉じるため、ブラウザが閉じるまで待つ。
+      await aborted;
+      unsubscribe();
+    }),
+  );
 
   return app;
 }
