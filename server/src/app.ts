@@ -1,13 +1,11 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { createLogWatcher } from "./log-watcher.js";
-import type { SessionsChangedEvent } from "./post.js";
+import { type SessionsChangedEvent, timelineMaxLimit } from "./post.js";
 import { decodeTimelineCursor, type LogRoots, readThread, readTimeline } from "./timeline.js";
 
 // タイムラインの 1 画面に並ぶ件数より多く、1 回の応答でログを読む量を抑えられる件数にするため。
 const timelineDefaultLimit = 50;
-// 画面が一度に描く件数として十分で、1 回の応答が大きくなりすぎない上限にするため。
-const timelineMaxLimit = 200;
 // サーバーは 127.0.0.1 だけで待ち受けるため、正しいリクエストの Host はこのどちらかになる。
 const localHostnames = new Set(["127.0.0.1", "localhost"]);
 // 発言が 1 秒ほどでタイムラインに流れ、流し見て遅れを感じない間隔にするため。

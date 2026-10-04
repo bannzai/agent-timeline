@@ -33,6 +33,9 @@ export interface TimelinePage {
   nextCursor: string | null;
 }
 
+/** 一覧の API (`/api/posts`) の limit の上限。画面が一度に描く件数として十分で、1 回の応答が大きくなりすぎない値にした。 */
+export const timelineMaxLimit = 200;
+
 /** 自動更新の API (`/api/events`) が送る `sessions-changed` の data。sessions は、ログが追記されたか新しく現れたセッション。 */
 export interface SessionsChangedEvent {
   sessions: Pick<PostSession, "agent" | "sessionId">[];

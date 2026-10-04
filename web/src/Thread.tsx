@@ -1,6 +1,7 @@
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import type { AgentKind, Post } from "../../server/src/post.js";
 import { projectName } from "./format";
+import { useLogChanges } from "./log-changes";
 import {
   AgentAvatar,
   HumanContext,
@@ -28,10 +29,17 @@ export function Thread({
   onBack: () => void;
 }) {
   const [threadState, setThreadState] = useState<ThreadState>({ status: "loading" });
+  // 直近に始めた読み込みを止めるためのもの。後から始めた読み込みの結果を、先に始めた読み込みの結果で上書きしないため。
+  const loadControllerRef = useRef<AbortController | null>(null);
 
-  useEffect(() => {
+  /**
+   * スレッドを読み、読めた投稿で表示を置き換える。
+   * 投稿を表示している時に読み込みに失敗した時は、表示中の投稿を残す。
+   */
+  const loadThread = useCallback(() => {
+    loadControllerRef.current?.abort();
     const controller = new AbortController();
-    setThreadState({ status: "loading" });
+    loadControllerRef.current = controller;
     fetch(`/api/sessions/${agent}/${encodeURIComponent(sessionId)}/posts`, {
       signal: controller.signal,
     })
@@ -48,11 +56,28 @@ export function Thread({
       })
       .catch(() => {
         if (!controller.signal.aborted) {
-          setThreadState({ status: "error" });
+          setThreadState((previousState) =>
+            previousState.status === "loaded" ? previousState : { status: "error" },
+          );
         }
       });
-    return () => controller.abort();
   }, [agent, sessionId]);
+
+  useEffect(() => {
+    setThreadState({ status: "loading" });
+    loadThread();
+    return () => loadControllerRef.current?.abort();
+  }, [loadThread]);
+
+  // このセッションのログが追記された時と、知らせにつながった時に読み直し、増えた発言を末尾に並べる。
+  useLogChanges((changedSessions) => {
+    if (
+      changedSessions === null ||
+      changedSessions.some((session) => session.agent === agent && session.sessionId === sessionId)
+    ) {
+      loadThread();
+    }
+  }, true);
 
   const firstPost = threadState.status === "loaded" ? threadState.posts[0] : undefined;
   // 相対時刻の基準。読み込むたびに描き直すため、描画の時点の時刻を使う。
