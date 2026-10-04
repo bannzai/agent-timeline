@@ -5,7 +5,7 @@
   "description": "X-like timeline for Claude Code / Codex sessions on localhost",
   "type": "module",
   "engines": {
-    "node": ">=22"
+    "node": ">=22.12"
   },
   "scripts": {
     "dev": "concurrently --names server,web \"tsx watch server/src/index.ts\" \"vite\"",

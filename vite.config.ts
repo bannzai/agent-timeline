@@ -11,7 +11,8 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     proxy: {
-      "/api": "http://127.0.0.1:7878",
+      // The same variable and default as the server (server/src/index.ts), so `npm run dev` follows a changed port.
+      "/api": `http://127.0.0.1:${process.env.AGENT_TIMELINE_PORT ?? 7878}`,
     },
   },
 });
