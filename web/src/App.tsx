@@ -23,6 +23,8 @@ export function App() {
   const [route, setRoute] = useState<Route>(() => routeFromPath(window.location.pathname));
   // スレッドを開く直前のタイムラインのスクロールの位置。
   const timelineScrollYRef = useRef(0);
+  // いま出している画面。ブラウザの戻る・進むの通知で、離れる画面がタイムラインかを知るために使う。
+  const currentScreenRef = useRef(route.screen);
 
   useEffect(() => {
     // 戻った時のスクロールの位置は、隠して残したタイムラインに合わせてこの画面が戻す。
@@ -34,13 +36,22 @@ export function App() {
     ) {
       window.history.replaceState(null, "", "/");
     }
-    /** ブラウザの戻る・進むで変わった URL を、画面の場所に写す。 */
-    const onPopState = () => setRoute(routeFromPath(window.location.pathname));
+    /**
+     * ブラウザの戻る・進むで変わった URL を、画面の場所に写す。タイムラインから離れる時は、読んでいた位置を残す
+     * (scrollRestoration が manual のため、通知の時点のスクロールの位置はまだタイムラインのもの)。
+     */
+    const onPopState = () => {
+      if (currentScreenRef.current === "home") {
+        timelineScrollYRef.current = window.scrollY;
+      }
+      setRoute(routeFromPath(window.location.pathname));
+    };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
   useLayoutEffect(() => {
+    currentScreenRef.current = route.screen;
     window.scrollTo(0, route.screen === "home" ? timelineScrollYRef.current : 0);
   }, [route]);
 

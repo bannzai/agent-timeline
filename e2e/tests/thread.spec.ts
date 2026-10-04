@@ -75,6 +75,25 @@ test("スレッドの URL を直接開いても同じ表示になる", async ({ 
   await expect(page.getByTestId("post").first()).toBeVisible();
 });
 
+test("ブラウザの進むでスレッドへ移った後に戻っても、タイムラインの読んでいた位置に戻る", async ({
+  page,
+}) => {
+  await openClaudeCartThreadFromTimeline(page);
+  await page.goBack();
+  await expect(page).toHaveURL("/");
+  // スレッドを開いた時と違う位置まで読み進めてから、ブラウザの進むでスレッドへ移る。
+  // 200px は、fixture の 14 件のタイムラインがこの画面の高さで届く位置。
+  await page.evaluate(() => window.scrollTo(0, 200));
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(200);
+  await page.goForward();
+  await expect(page).toHaveURL(claudeCartThreadPath);
+  await expect(page.getByTestId("thread-post").first()).toBeVisible();
+
+  await page.goBack();
+  await expect(page).toHaveURL("/");
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(200);
+});
+
 test("ツール呼び出しを開くと入力と結果の要約を表示する", async ({ page }, testInfo) => {
   await page.goto(claudeCartThreadPath);
 
