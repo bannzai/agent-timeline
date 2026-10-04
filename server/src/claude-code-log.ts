@@ -9,6 +9,7 @@ import {
   postTimestamp,
   type SessionLogFile,
   toolCallText,
+  toolResultText,
 } from "./post.js";
 
 // Claude Code のログの形式の知識は、このファイルの中だけに置く (documents/PROJECT.md「入力」)。
@@ -66,6 +67,8 @@ export function parseClaudeCodeSessionLog(sessionId: string, logText: string): P
   // cwd と gitBranch は各行が持つ。持たない行は、直前の行の値のままとみなす。
   let projectDirectory: string | null = null;
   let gitBranch: string | null = null;
+  // tool_result は、呼び出しの tool_use の id を tool_use_id に持つ。結果を呼び出しの投稿の toolResult に入れるため、id から引く。
+  const toolPostsByToolUseId = new Map<string, Post>();
 
   logText.split("\n").forEach((line, lineIndex) => {
     const entry = parseJson(line);
@@ -101,6 +104,7 @@ export function parseClaudeCodeSessionLog(sessionId: string, logText: string): P
           session,
           author: textAuthor,
           text: content,
+          toolResult: null,
           timestamp,
         });
       }
@@ -109,7 +113,7 @@ export function parseClaudeCodeSessionLog(sessionId: string, logText: string): P
     if (!Array.isArray(content)) {
       return;
     }
-    // thinking と tool_result (user の行に入るツールの結果) は投稿にしない。
+    // thinking は投稿にしない。tool_result (user の行に入るツールの結果) は、呼び出しの投稿に入れる。
     content.forEach((block: unknown, blockIndex) => {
       if (!isRecord(block)) {
         return;
@@ -120,15 +124,32 @@ export function parseClaudeCodeSessionLog(sessionId: string, logText: string): P
         typeof block.text === "string" &&
         isPostText(block.text, textAuthor)
       ) {
-        posts.push({ id, session, author: textAuthor, text: block.text, timestamp });
-      } else if (block.type === "tool_use" && typeof block.name === "string") {
         posts.push({
+          id,
+          session,
+          author: textAuthor,
+          text: block.text,
+          toolResult: null,
+          timestamp,
+        });
+      } else if (block.type === "tool_use" && typeof block.name === "string") {
+        const toolPost: Post = {
           id,
           session,
           author: "tool",
           text: toolCallText(block.name, JSON.stringify(block.input ?? {})),
+          toolResult: null,
           timestamp,
-        });
+        };
+        posts.push(toolPost);
+        if (typeof block.id === "string") {
+          toolPostsByToolUseId.set(block.id, toolPost);
+        }
+      } else if (block.type === "tool_result" && typeof block.tool_use_id === "string") {
+        const toolPost = toolPostsByToolUseId.get(block.tool_use_id);
+        if (toolPost !== undefined) {
+          toolPost.toolResult = toolResultText(block.content);
+        }
       }
     });
   });

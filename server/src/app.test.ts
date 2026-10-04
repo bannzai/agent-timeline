@@ -1,7 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
-import type { Post, PostSession } from "./post.js";
-import { logRootsFromEnv, type TimelinePage } from "./timeline.js";
+import type { Post, PostSession, TimelinePage } from "./post.js";
+import { logRootsFromEnv } from "./timeline.js";
 
 // vitest.config.ts が、ログのルートの環境変数を fixtures/ の合成セッションに向けている。
 const app = createApp(logRootsFromEnv(process.env));
@@ -10,6 +10,19 @@ const claudeCart = "3f2a9c1e-5b7d-4e8a-9c6f-1a2b3c4d5e6f";
 const claudeReadme = "8d4e2f6a-1c3b-4a5d-8e7f-9a0b1c2d3e4f";
 const codexUnit = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 const codexTax = "0199b2c3-d4e5-7f6a-9b0c-1d2e3f4a5b6c";
+
+/** fixtures/ の codexUnit のセッションにある、画面で省略される長さの agent の返答。 */
+const codexUnitPlanText = [
+  "切り替えを入れる前に今の作りを確認しました",
+  "",
+  "- 気温は天気の API から摂氏で受け取り、Forecast の表示でそのまま出しています",
+  "- 設定ファイルには単位の項目がありません",
+  "- テストは摂氏の表示だけを確認しています",
+  "",
+  "方針として --unit オプションを足し、c か f を受け取ります。既定は c にして、今の表示を変えません。華氏は表示の直前に 9/5 を掛けて 32 を足す変換で出し、API から受け取る値と設定ファイルの形は変えません。",
+  "",
+  "テストには、華氏の表示と、知らない単位を渡した時のエラーの 2 つを足します。README の使い方の節にもオプションの説明を 1 行足します。続けて実装します",
+].join("\n");
 
 /** fixtures/ の全セッションの投稿を新しい順に並べたもの。agent をまたいで日時が交互になる。 */
 const allPostsNewestFirst = [
@@ -25,6 +38,7 @@ const allPostsNewestFirst = [
   ["claude-code", claudeCart, "human", "カートに商品を追加しても合計金額が更新されないので直して"],
   ["codex", codexUnit, "agent", "--unit オプションを追加しました"],
   ["codex", codexUnit, "tool", "apply_patch *** Begin Patch\n*** End Patch"],
+  ["codex", codexUnit, "agent", codexUnitPlanText],
   // < で始まる人間の指示は、Codex が差し込む文脈と違って残る。
   ["codex", codexUnit, "human", "<Forecast> の気温を摂氏と華氏で切り替えるオプションを足して"],
 ];
@@ -129,6 +143,21 @@ describe("GET /api/posts", () => {
     expect(sessionOf(body.posts, codexUnit)?.gitBranch).toBeNull();
   });
 
+  it("ツール呼び出しの投稿に、同じ呼び出しの結果を入れる", async () => {
+    const { posts } = await responseJson<TimelinePage>(await app.request("/api/posts"));
+
+    // 結果は、Claude Code では文字列の content、Codex では文字列の output と text を持つ要素の配列の output で書かれる。
+    expect(
+      posts.filter((post) => post.author === "tool").map((post) => [post.text, post.toolResult]),
+    ).toEqual([
+      ['Bash {"command":"cat package.json"}', '{"scripts":{"start":"node index.js"}}'],
+      ['shell {"command":["rg","tax"]}', "src/tax.ts"],
+      ['Read {"file_path":"/home/dev/acme-shop/src/cart.ts"}', "export function addItem() {}"],
+      ["apply_patch *** Begin Patch\n*** End Patch", "Success"],
+    ]);
+    expect(posts.filter((post) => post.author !== "tool" && post.toolResult !== null)).toEqual([]);
+  });
+
   it("limit と cursor で続きを取ると、全件を抜けも重なりもなく返す", async () => {
     const pages: TimelinePage[] = [];
     let cursor: string | null = null;
@@ -138,8 +167,19 @@ describe("GET /api/posts", () => {
       cursor = page.nextCursor;
     } while (cursor !== null);
 
-    expect(pages.map((page) => page.posts.length)).toEqual([5, 5, 3]);
+    expect(pages.map((page) => page.posts.length)).toEqual([5, 5, 4]);
     expect(pages.flatMap((page) => page.posts).map(postSummary)).toEqual(allPostsNewestFirst);
+  });
+
+  it("ログのルートが空のディレクトリの時は、空の一覧を返す", async () => {
+    // fixtures/empty は、ログのファイルを持たないディレクトリ (git に残すための .gitkeep だけを持つ)。
+    const response = await createApp({
+      claudeCodeProjectsDirectory: "fixtures/empty",
+      codexSessionsDirectory: "fixtures/empty",
+    }).request("/api/posts");
+
+    expect(response.status).toBe(200);
+    expect(await response.json()).toEqual({ posts: [], nextCursor: null });
   });
 
   it("不正な limit と cursor は 400 を返す", async () => {

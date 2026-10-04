@@ -21,8 +21,19 @@ export interface Post {
   session: PostSession;
   author: PostAuthor;
   text: string;
+  /**
+   * author が tool の投稿の、ツールの結果の先頭。tool でない投稿、結果がまだログに無い投稿、
+   * 文を持たない結果 (画像だけの結果など) の投稿は null。
+   */
+  toolResult: string | null;
   /** 発言の日時。UTC の ISO 8601 (`Date.prototype.toISOString` の形) で、文字列の大小が日時の前後と一致する。 */
   timestamp: string;
+}
+
+/** 一覧の 1 ページ。nextCursor は続きを取る時に一覧の API へ渡す値で、続きがある時だけ持つ。 */
+export interface TimelinePage {
+  posts: Post[];
+  nextCursor: string | null;
 }
 
 /** 1 つのセッションのログのファイル。 */
@@ -35,6 +46,9 @@ export interface SessionLogFile {
 // ツール呼び出しは画面で 1 行に畳むため、引数の全文は要らない。ファイルの書き込みの本文などで応答が膨らむのを防ぐ。
 // 300 文字は、1 行に畳んだ時に見える幅より長く、読むファイルのパスや実行するコマンドがふつう収まる長さとして選んだ。
 const toolCallTextMaxLength = 300;
+// ツールの結果は、スレッドでツール呼び出しを開いた時に要約として読む。ファイルの読み取りの全文などで応答が膨らむのを防ぐ。
+// 500 文字は、エラーの 1 行目やコマンドの出力の冒頭の数行が収まり、開いた画面が結果で埋まらない長さとして選んだ。
+const toolResultTextMaxLength = 500;
 
 /**
  * ログの中の位置から投稿の ID を作る。行とブロックの番号は桁をそろえて書き、
@@ -80,5 +94,32 @@ export function postTimestamp(value: unknown): string | null {
 
 /** ツール呼び出しの投稿の本文を、ツールの名前と引数から作る。 */
 export function toolCallText(toolName: string, toolInput: string): string {
-  return `${toolName} ${toolInput}`.slice(0, toolCallTextMaxLength);
+  return sliceCharacters(`${toolName} ${toolInput}`, toolCallTextMaxLength);
+}
+
+/** 文の先頭の maxLength 文字を返す。UTF-16 のコード単位ではなく文字 (コードポイント) で数え、絵文字を途中で切らない。 */
+function sliceCharacters(text: string, maxLength: number): string {
+  return Array.from(text).slice(0, maxLength).join("");
+}
+
+/**
+ * ツールの結果を、投稿の toolResult の形にする。結果は文字列か、`text` を持つ要素の配列で書かれる。
+ * 文を持たない結果 (画像だけの結果・知らない形の結果など) は null を返す。
+ */
+export function toolResultText(toolOutput: unknown): string | null {
+  if (typeof toolOutput === "string") {
+    return toolOutput === "" ? null : sliceCharacters(toolOutput, toolResultTextMaxLength);
+  }
+  if (!Array.isArray(toolOutput)) {
+    return null;
+  }
+  const itemTexts = toolOutput.map(contentItemText).filter((itemText) => itemText !== null);
+  return itemTexts.length === 0
+    ? null
+    : sliceCharacters(itemTexts.join("\n"), toolResultTextMaxLength);
+}
+
+/** 発言やツールの結果の配列の要素 (`{ type, text }`) の文。文を持たない要素は null を返す。 */
+export function contentItemText(item: unknown): string | null {
+  return isRecord(item) && typeof item.text === "string" ? item.text : null;
 }

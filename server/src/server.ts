@@ -22,6 +22,8 @@ export function startServer(options: StartServerOptions): Promise<ServerType> {
   const app = createApp(options.logRoots);
   // ビルド済みの画面。`npm start` はリポジトリのルートで実行される。
   app.use("/*", serveStatic({ root: "./dist/web" }));
+  // スレッドの URL は画面の中の場所で、ファイルではない。URL を直接開いた時も画面を返し、画面が URL から場所を読む。
+  app.get("/sessions/*", serveStatic({ path: "./dist/web/index.html" }));
 
   return new Promise((resolve, reject) => {
     // 127.0.0.1 だけで待ち受ける。ログインが無いため、別のマシンから会話に届かないようにする。
