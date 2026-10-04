@@ -233,7 +233,7 @@ async function listRunningProcesses(ps: string): Promise<RunningProcess[] | null
 
 /**
  * プロセスの引数から、そのプロセスが指示を受け取る対話の agent かを返し、どの agent かを返す。そうでなければ null を返す。
- * Claude Code は `claude`、Codex は `codex` の実行ファイルで動く。npm で入れたものは `node <パス>/claude` の形で動く。
+ * Claude Code は `claude`、Codex は `codex` の実行ファイルで動く。npm で入れたものは `node <パス>/claude`・`node <パス>/codex.js` の形で動く。
  * 対話でない起動 (`claude -p`・`codex exec` などのサブコマンド) は端末の入力を読まず、送った本文が終わった後のシェルに残って
  * コマンドとして実行されうるため、agent とみなさない。
  */
@@ -241,20 +241,39 @@ function processAgent(args: string): AgentKind | null {
   const tokens = args.split(/\s+/);
   const [program = "", script = ""] = tokens;
   const isNodeScript = path.basename(program) === "node";
-  const name = path.basename(isNodeScript ? script : program);
+  const name = path.basename(isNodeScript ? script : program).replace(/\.m?js$/, "");
   const agentArgs = tokens.slice(isNodeScript ? 2 : 1);
   if (name === "claude") {
     return agentArgs.some((arg) => arg === "-p" || arg === "--print") ||
-      claudeNonInteractiveCommands.has(firstPositionalArg(agentArgs, claudeValueOptions) ?? "")
+      startsNonInteractiveCommand(agentArgs, claudeValueOptions, claudeNonInteractiveCommands)
       ? null
       : "claude-code";
   }
   if (name === "codex") {
-    return codexNonInteractiveCommands.has(firstPositionalArg(agentArgs, codexValueOptions) ?? "")
+    return startsNonInteractiveCommand(agentArgs, codexValueOptions, codexNonInteractiveCommands)
       ? null
       : "codex";
   }
   return null;
+}
+
+/**
+ * agent の引数が、対話でないサブコマンドの起動か。ps は引数を空白でつないで出すため、空白を含むオプションの値
+ * (`-c 'effort = "high"'`) があると引数の境目が分からない。値を取るオプションがある時は、後ろのどこかにサブコマンドの名前があれば
+ * 対話でないとみなし、送り先にしない側に倒す (指示の語がサブコマンドの名前と重なる起動も送り先にならない)。
+ */
+function startsNonInteractiveCommand(
+  agentArgs: string[],
+  valueOptions: Set<string>,
+  nonInteractiveCommands: Set<string>,
+): boolean {
+  if (nonInteractiveCommands.has(firstPositionalArg(agentArgs, valueOptions) ?? "")) {
+    return true;
+  }
+  return (
+    agentArgs.some((arg) => valueOptions.has(arg.split("=")[0] ?? "")) &&
+    agentArgs.some((arg) => nonInteractiveCommands.has(arg))
+  );
 }
 
 /**

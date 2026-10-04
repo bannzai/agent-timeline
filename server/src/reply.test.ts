@@ -189,6 +189,14 @@ describe("スレッドの API の返信できるか", () => {
     ["オプションの後の codex exec", "codex", codexTax, "codex -m gpt-5 -c model=o3 exec 指示"],
     ["= で値を渡したオプションの後の codex exec", "codex", codexTax, "codex --model=gpt-5 exec"],
     ["オプションの後の claude mcp", "claude-code", claudeCart, "claude --model opus mcp list"],
+    // ps は引数を空白でつなぐため、`-c 'model_reasoning_effort = "high"'` の値の空白で引数の境目が分からなくなる。
+    [
+      "空白を含む値のオプションの後の codex exec",
+      "codex",
+      codexTax,
+      'codex -c model_reasoning_effort = "high" exec 指示',
+    ],
+    ["値を取るオプションと、後ろのサブコマンドの名前", "codex", codexTax, "codex -p exec"],
   ])(
     "対話でない起動 (%s) の agent の pane は、端末の入力を読まないため送り先にしない",
     async (_, agent, sessionId, agentArgs) => {
@@ -211,7 +219,12 @@ describe("スレッドの API の返信できるか", () => {
     ["codex resume", "codex", codexTax, "codex resume --last"],
     ["codex に指示を渡した起動", "codex", codexTax, "codex 端数を直して"],
     ["オプションの後の codex resume", "codex", codexTax, "codex -m gpt-5 resume --last"],
-    ["値が exec のオプション", "codex", codexTax, "codex -p exec"],
+    [
+      "npm の codex.js",
+      "codex",
+      codexTax,
+      "node /usr/local/lib/node_modules/@openai/codex/bin/codex.js resume --last",
+    ],
   ])("対話の起動 (%s) の agent の pane は送り先にする", async (_, agent, sessionId, agentArgs) => {
     const context = await prepareReplyTest();
     await replaceFakeTables(context, {
