@@ -106,7 +106,9 @@ export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession
       .then((page) => {
         setNewPosts((previousNewPosts) => {
           const { posts: loadedPosts, nextCursor: loadedNextCursor } = loadedTimelineRef.current;
-          const knownPostIds = new Set([...loadedPosts, ...previousNewPosts].map((post) => post.id));
+          const knownPostIds = new Set(
+            [...loadedPosts, ...previousNewPosts].map((post) => post.id),
+          );
           // 読み込んだ範囲の最も古い投稿。続きが無い (全件を読んだ) 時は範囲の下限が無いため undefined。
           const oldestPost = loadedNextCursor === null ? undefined : loadedPosts.at(-1);
           const arrivedPosts = page.posts.filter(
