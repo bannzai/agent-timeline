@@ -69,6 +69,18 @@ describe("GET /api/health", () => {
   });
 });
 
+describe("Host の検査", () => {
+  it("Host がこのマシンのリクエストに答える", async () => {
+    expect((await app.request("http://127.0.0.1:7878/api/posts")).status).toBe(200);
+    expect((await app.request("http://localhost:5173/api/posts")).status).toBe(200);
+  });
+
+  it("Host が別のマシンのリクエストは 403 を返す", async () => {
+    expect((await app.request("http://attacker.example/api/posts")).status).toBe(403);
+    expect((await app.request("http://attacker.example:7878/api/health")).status).toBe(403);
+  });
+});
+
 describe("GET /api/posts", () => {
   it("Claude Code と Codex の投稿を日時の新しい順に返す", async () => {
     const response = await app.request("/api/posts");

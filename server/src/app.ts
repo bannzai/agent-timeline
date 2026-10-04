@@ -5,10 +5,22 @@ import { decodeTimelineCursor, type LogRoots, readThread, readTimeline } from ".
 const timelineDefaultLimit = 50;
 // 画面が一度に描く件数として十分で、1 回の応答が大きくなりすぎない上限にするため。
 const timelineMaxLimit = 200;
+// サーバーは 127.0.0.1 だけで待ち受けるため、正しいリクエストの Host はこのどちらかになる。
+const localHostnames = new Set(["127.0.0.1", "localhost"]);
 
 /** agent-timeline の HTTP API を返す。静的ファイルの配信と待ち受けを含まないため、テストから直接呼べる。 */
 export function createApp(logRoots: LogRoots): Hono {
   const app = new Hono();
+
+  // 会話のログを返すため、Host がこのマシンでないリクエストは拒否する。ブラウザで開いた別のサイトが
+  // 自分のドメインを 127.0.0.1 に向け直して (DNS rebinding) 同じオリジンとして読むのを防ぐ (documents/PROJECT.md「制約」)。
+  // @hono/node-server はリクエストの URL を Host ヘッダーから組み立てる。
+  app.use("/api/*", async (c, next) => {
+    if (!localHostnames.has(new URL(c.req.url).hostname)) {
+      return c.json({ error: "Host がこのマシンではない" }, 403);
+    }
+    await next();
+  });
 
   app.get("/api/health", (c) => c.json({ status: "ok" }));
 
