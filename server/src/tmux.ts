@@ -242,14 +242,15 @@ async function listRunningProcesses(ps: string): Promise<RunningProcess[] | null
 
 /**
  * プロセスの引数から、そのプロセスが指示を受け取る対話の agent かを返し、どの agent かを返す。そうでなければ null を返す。
- * Claude Code は `claude`、Codex は `codex` の実行ファイルで動く。npm で入れたものは `node <パス>/claude`・`node <パス>/codex.js` の形で動く。
+ * Claude Code は `claude`、Codex は `codex` の実行ファイルで動く。npm で入れたものは `node <パス>/claude`・`node <パス>/codex.js` の形で、
+ * bun で動かしたものは `bun <パス>/claude` の形で動く。
  * 対話でない起動 (`claude -p`・`codex exec` などのサブコマンド) は端末の入力を読まず、送った本文が終わった後のシェルに残って
  * コマンドとして実行されうるため、agent とみなさない。
  */
 function processAgent(args: string): AgentKind | null {
   const tokens = args.split(/\s+/);
   const [program = "", script = ""] = tokens;
-  const isNodeScript = path.basename(program) === "node";
+  const isNodeScript = ["node", "bun"].includes(path.basename(program));
   const name = path.basename(isNodeScript ? script : program).replace(/\.m?js$/, "");
   const agentArgs = tokens.slice(isNodeScript ? 2 : 1);
   if (name === "claude") {

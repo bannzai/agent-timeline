@@ -446,6 +446,11 @@ button.tool-call:hover {
   line-height: 24px;
 }
 
+/* 枠の無い入力のため、キーボードで移った時の目印を下線で出す。 */
+.reply-input:focus-visible {
+  box-shadow: 0 2px 0 var(--accent);
+}
+
 .reply-input::placeholder {
   color: var(--text-secondary);
 }

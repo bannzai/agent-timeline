@@ -230,13 +230,18 @@ function ReplyComposer({ agent, sessionId }: { agent: AgentKind; sessionId: stri
           返信
         </button>
       </form>
-      {sendState.status !== "idle" && (
-        <p className="reply-status" data-testid="reply-status" data-status={sendState.status}>
-          {sendState.status === "sending" && "送信中"}
-          {sendState.status === "sent" && "届きました"}
-          {sendState.status === "failed" && `届きませんでした (${sendState.reason})`}
-        </p>
-      )}
+      {/* スクリーンリーダーが送信の結果を読み上げるよう、状態の領域は送る前から置いておく。 */}
+      <p
+        className="reply-status"
+        role="status"
+        data-testid="reply-status"
+        data-status={sendState.status}
+        hidden={sendState.status === "idle"}
+      >
+        {sendState.status === "sending" && "送信中"}
+        {sendState.status === "sent" && "届きました"}
+        {sendState.status === "failed" && `届きませんでした (${sendState.reason})`}
+      </p>
     </div>
   );
 }

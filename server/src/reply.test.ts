@@ -220,6 +220,7 @@ describe("スレッドの API の返信できるか", () => {
     ["codex resume", "codex", codexTax, "codex resume --last"],
     ["codex に指示を渡した起動", "codex", codexTax, "codex 端数を直して"],
     ["オプションの後の codex resume", "codex", codexTax, "codex -m gpt-5 resume --last"],
+    ["bun で動かした claude", "claude-code", claudeCart, "bun /home/dev/.bun/bin/claude"],
     [
       "npm の codex.js",
       "codex",
@@ -314,6 +315,8 @@ describe("POST /api/sessions/:agent/:sessionId/replies", () => {
     ["NUL", "合計\u0000を直して"],
     ["DEL", "合計\u007fを直して"],
     ["C1 制御文字", "合計\u009bを直して"],
+    ["Unicode の行区切り", "一行目 二行目"],
+    ["Unicode の段落区切り", "一行目 二行目"],
   ])("%sを含む本文は 400 を返し、何も送らない", async (_, text) => {
     const { app, tmuxCallsFile } = await prepareReplyTest();
 

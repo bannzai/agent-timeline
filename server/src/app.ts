@@ -113,7 +113,8 @@ export function createApp(options: AppOptions): Hono {
       );
     }
     // 改行は tmux に渡ると Enter として届き、制御文字は端末やエージェントの操作になるため、1 行の文字だけを受け付ける。
-    if (/\p{Cc}/u.test(text)) {
+    // Unicode の行区切り・段落区切り (U+2028・U+2029) も、受け取る側が改行として扱いうるため受け付けない。
+    if (/[\p{Cc}\p{Zl}\p{Zp}]/u.test(text)) {
       return c.json({ error: "改行や制御文字を含む本文は送れません" }, 400);
     }
 
