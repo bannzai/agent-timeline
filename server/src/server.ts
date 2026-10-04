@@ -26,6 +26,8 @@ export function startServer(options: StartServerOptions): Promise<ServerType> {
   return new Promise((resolve, reject) => {
     // 127.0.0.1 だけで待ち受ける。ログインが無いため、別のマシンから会話に届かないようにする。
     const server = serve({ fetch: app.fetch, hostname: "127.0.0.1", port: options.port }, () => {
+      // 待ち受けの後に起きたエラーを握りつぶさず、これまでどおりプロセスを止めるため。
+      server.off("error", reject);
       // 待ち受けに失敗した起動を数えないため、待ち受けを始めてから書く。
       // 利用記録は判定のための計測で、書けなくてもアプリは使えるため、警告だけ出して起動を続ける。
       appendStartEvent(options.usageLogDirectory, new Date())
