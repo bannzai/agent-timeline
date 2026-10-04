@@ -144,6 +144,8 @@ interface TmuxPane {
   paneId: string;
   /** pane で最初に起動したプロセス (ふつうはシェル) の pid。 */
   panePid: number;
+  /** pane がコピーモードなどのモードにいるか。モードの間は、送ったキーがモードの操作として使われ、agent に届かない。 */
+  paneInMode: boolean;
   /** pane の手前で動いているプロセスの作業ディレクトリ。 */
   paneCurrentPath: string;
 }
@@ -195,17 +197,24 @@ async function listTmuxPanes(tmux: string): Promise<TmuxPane[] | null> {
     "list-panes",
     "-a",
     "-F",
-    "#{pane_id}\t#{pane_pid}\t#{pane_current_path}",
+    "#{pane_id}\t#{pane_pid}\t#{pane_in_mode}\t#{pane_current_path}",
   ]);
   if (stdout === null) {
     return null;
   }
   return stdout.split("\n").flatMap((line) => {
-    const [paneId, panePidText, ...pathParts] = line.split("\t");
+    const [paneId, panePidText, paneInModeText, ...pathParts] = line.split("\t");
     const panePid = Number(panePidText);
     return paneId === undefined || !Number.isInteger(panePid) || pathParts.length === 0
       ? []
-      : [{ paneId, panePid, paneCurrentPath: pathParts.join("\t") }];
+      : [
+          {
+            paneId,
+            panePid,
+            paneInMode: paneInModeText !== "0",
+            paneCurrentPath: pathParts.join("\t"),
+          },
+        ];
   });
 }
 
@@ -244,7 +253,8 @@ function processAgent(args: string): AgentKind | null {
   const name = path.basename(isNodeScript ? script : program).replace(/\.m?js$/, "");
   const agentArgs = tokens.slice(isNodeScript ? 2 : 1);
   if (name === "claude") {
-    return agentArgs.some((arg) => arg === "-p" || arg === "--print") ||
+    // `-p` は、ほかの 1 文字のオプションとまとめて書ける (`-cp`)。
+    return agentArgs.some((arg) => arg === "--print" || /^-[a-zA-Z]*p[a-zA-Z]*$/.test(arg)) ||
       startsNonInteractiveCommand(agentArgs, claudeValueOptions, claudeNonInteractiveCommands)
       ? null
       : "claude-code";
@@ -341,6 +351,12 @@ export async function findReplyTarget(
     return {
       available: false,
       reason: "同じディレクトリで同じ種類のエージェントが複数動いているため送り先を決められません",
+    };
+  }
+  if (matchedPane.paneInMode) {
+    return {
+      available: false,
+      reason: "pane がスクロール中 (コピーモード) のため返信できません",
     };
   }
   return { available: true, paneId: matchedPane.paneId };

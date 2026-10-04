@@ -145,7 +145,7 @@ describe("スレッドの API の返信できるか", () => {
     const context = await prepareReplyTest();
     // acme-shop の pane の Claude Code が、レビューのために codex を起動している。
     await replaceFakeTables(context, {
-      panes: ["%1\t1001\t/home/dev/acme-shop"],
+      panes: ["%1\t1001\t0\t/home/dev/acme-shop"],
       processes: [
         " 1001     1 Ss   -zsh",
         " 1101  1001 S+   claude",
@@ -168,7 +168,7 @@ describe("スレッドの API の返信できるか", () => {
     async (_, agentProcessLine) => {
       const context = await prepareReplyTest();
       await replaceFakeTables(context, {
-        panes: ["%1\t1001\t/home/dev/acme-shop"],
+        panes: ["%1\t1001\t0\t/home/dev/acme-shop"],
         processes: [" 1001     1 Ss+  -zsh", agentProcessLine],
       });
 
@@ -183,6 +183,7 @@ describe("スレッドの API の返信できるか", () => {
     ["claude -p", "claude-code", claudeCart, "claude -p 合計を直して"],
     ["claude --print", "claude-code", claudeCart, "claude --model opus --print 合計を直して"],
     ["claude mcp", "claude-code", claudeCart, "claude mcp list"],
+    ["-c とまとめた claude -p", "claude-code", claudeCart, "claude -cp 合計を直して"],
     ["codex exec", "codex", codexTax, "codex exec 端数を直して"],
     ["npm の codex exec", "codex", codexTax, "node /usr/local/bin/codex exec 端数を直して"],
     ["codex review", "codex", codexTax, "codex review"],
@@ -202,7 +203,7 @@ describe("スレッドの API の返信できるか", () => {
     async (_, agent, sessionId, agentArgs) => {
       const context = await prepareReplyTest();
       await replaceFakeTables(context, {
-        panes: ["%1\t1001\t/home/dev/acme-shop"],
+        panes: ["%1\t1001\t0\t/home/dev/acme-shop"],
         processes: [" 1001     1 Ss   -zsh", ` 1101  1001 S+   ${agentArgs}`],
       });
 
@@ -228,7 +229,7 @@ describe("スレッドの API の返信できるか", () => {
   ])("対話の起動 (%s) の agent の pane は送り先にする", async (_, agent, sessionId, agentArgs) => {
     const context = await prepareReplyTest();
     await replaceFakeTables(context, {
-      panes: ["%1\t1001\t/home/dev/acme-shop"],
+      panes: ["%1\t1001\t0\t/home/dev/acme-shop"],
       processes: [" 1001     1 Ss   -zsh", ` 1101  1001 S+   ${agentArgs}`],
     });
 
@@ -236,6 +237,21 @@ describe("スレッドの API の返信できるか", () => {
       available: true,
       paneId: "%1",
     });
+  });
+
+  it("pane がコピーモードの時は、送ったキーがモードの操作になるため送り先にしない", async () => {
+    const context = await prepareReplyTest();
+    await replaceFakeTables(context, {
+      panes: ["%1\t1001\t1\t/home/dev/acme-shop"],
+      processes: [" 1001     1 Ss   -zsh", " 1101  1001 S+   claude"],
+    });
+
+    expect(await requestReplyTarget(context.app, `claude-code/${claudeCart}`)).toEqual({
+      available: false,
+      reason: "pane がスクロール中 (コピーモード) のため返信できません",
+    });
+    expect((await postReply(context.app, `claude-code/${claudeCart}`, replyText)).status).toBe(409);
+    expect(await readSendKeysCalls(context.tmuxCallsFile)).toEqual([]);
   });
 
   it("tmux のサーバーが動いていない時は、返信できない理由を返す", async () => {
@@ -380,7 +396,7 @@ describe("POST /api/sessions/:agent/:sessionId/replies", () => {
     );
     // Claude Code を終えて、同じ pane でエディタを開いた。
     await replaceFakeTables(context, {
-      panes: ["%1\t1001\t/home/dev/acme-shop"],
+      panes: ["%1\t1001\t0\t/home/dev/acme-shop"],
       processes: [" 1001     1 Ss   -zsh", " 1301  1001 S+   vim src/cart.ts"],
     });
 
@@ -395,7 +411,7 @@ describe("POST /api/sessions/:agent/:sessionId/replies", () => {
     // 本文の入力が偽の tmux に届いた後、Enter の前に Claude Code を Ctrl+Z で止めた。
     await expect.poll(() => readSendKeysCalls(context.tmuxCallsFile)).toHaveLength(1);
     await replaceFakeTables(context, {
-      panes: ["%1\t1001\t/home/dev/acme-shop"],
+      panes: ["%1\t1001\t0\t/home/dev/acme-shop"],
       processes: [" 1001     1 Ss+  -zsh", " 1101  1001 T    claude"],
     });
     const response = await responsePromise;
