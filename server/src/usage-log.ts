@@ -29,14 +29,21 @@ export function localIsoTimestamp(date: Date): string {
   );
 }
 
+/** 利用記録に書く出来事。start はサーバーの起動、reply は返信の送信。 */
+export type UsageEvent = "start" | "reply";
+
 /**
- * 利用記録に起動の行 (`{"event":"start","at":...}`) を 1 行足す。ディレクトリが無ければ作る。書けない時は reject する。
- * 起動 1 回ごとに 1 行増えることが記録の意味のため、冪等にしない。
+ * 利用記録に出来事の行 (`{"event":"start","at":...}`) を 1 行足す。ディレクトリが無ければ作る。書けない時は reject する。
+ * 起動・返信の 1 回ごとに 1 行増えることが記録の意味のため、冪等にしない。
  */
-export async function appendStartEvent(directory: string, date: Date): Promise<void> {
+export async function appendUsageEvent(
+  directory: string,
+  event: UsageEvent,
+  date: Date,
+): Promise<void> {
   await mkdir(directory, { recursive: true });
   await appendFile(
     path.join(directory, "usage.jsonl"),
-    `${JSON.stringify({ event: "start", at: localIsoTimestamp(date) })}\n`,
+    `${JSON.stringify({ event, at: localIsoTimestamp(date) })}\n`,
   );
 }

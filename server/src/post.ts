@@ -36,6 +36,10 @@ export interface TimelinePage {
   nextCursor: string | null;
 }
 
+/** セッションへ返信できるか。できる時は送り先の tmux の pane の ID、できない時は画面に 1 行で出す理由を持つ。 */
+export type ReplyTarget =
+  { available: true; paneId: string } | { available: false; reason: string };
+
 /** 1 つのセッションのログのファイル。 */
 export interface SessionLogFile {
   agent: AgentKind;

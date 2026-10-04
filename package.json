@@ -12,7 +12,7 @@
     "dev": "concurrently --names server,web \"tsx watch server/src/index.ts\" \"vite\"",
     "build": "vite build && tsc -p tsconfig.server.build.json",
     "start": "npm run build && node dist/server/index.js",
-    "start:fixtures": "AGENT_TIMELINE_CLAUDE_PROJECTS_DIR=fixtures/claude/projects AGENT_TIMELINE_CODEX_SESSIONS_DIR=fixtures/codex/sessions AGENT_TIMELINE_USAGE_DIR=tmp/usage npm start",
+    "start:fixtures": "AGENT_TIMELINE_CLAUDE_PROJECTS_DIR=fixtures/claude/projects AGENT_TIMELINE_CODEX_SESSIONS_DIR=fixtures/codex/sessions AGENT_TIMELINE_USAGE_DIR=tmp/usage AGENT_TIMELINE_TMUX=fixtures/fake-commands/tmux.mjs AGENT_TIMELINE_PS=fixtures/fake-commands/ps.mjs FAKE_TMUX_PANES_FILE=fixtures/fake-commands/panes.tsv FAKE_PS_FILE=fixtures/fake-commands/processes.txt FAKE_TMUX_CALLS_FILE=tmp/fake-tmux-calls.jsonl npm start",
     "typecheck": "tsc -p tsconfig.server.json && tsc -p tsconfig.web.json && tsc -p e2e",
     "lint": "eslint .",
     "format": "prettier --write .",

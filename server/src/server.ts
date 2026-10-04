@@ -1,17 +1,12 @@
 import { serve, type ServerType } from "@hono/node-server";
 import { serveStatic } from "@hono/node-server/serve-static";
-import { createApp } from "./app.js";
-import type { LogRoots } from "./timeline.js";
-import { appendStartEvent } from "./usage-log.js";
+import { type AppOptions, createApp } from "./app.js";
+import { appendUsageEvent } from "./usage-log.js";
 
 /** startServer に渡す設定。 */
-export interface StartServerOptions {
+export interface StartServerOptions extends AppOptions {
   /** 待ち受けるポート。0 なら空いているポートを OS が選ぶ。 */
   port: number;
-  /** 読むセッションのログのルート。 */
-  logRoots: LogRoots;
-  /** 利用記録 (usage.jsonl) を置くディレクトリ。 */
-  usageLogDirectory: string;
 }
 
 /**
@@ -19,7 +14,7 @@ export interface StartServerOptions {
  * 利用記録を書けない時は警告だけ出して起動を続ける。待ち受けに失敗した時は reject する。
  */
 export function startServer(options: StartServerOptions): Promise<ServerType> {
-  const app = createApp(options.logRoots);
+  const app = createApp(options);
   // ビルド済みの画面。`npm start` はリポジトリのルートで実行される。
   app.use("/*", serveStatic({ root: "./dist/web" }));
   // スレッドの URL は画面の中の場所で、ファイルではない。URL を直接開いた時も画面を返し、画面が URL から場所を読む。
@@ -32,7 +27,7 @@ export function startServer(options: StartServerOptions): Promise<ServerType> {
       server.off("error", reject);
       // 待ち受けに失敗した起動を数えないため、待ち受けを始めてから書く。
       // 利用記録は判定のための計測で、書けなくてもアプリは使えるため、警告だけ出して起動を続ける。
-      appendStartEvent(options.usageLogDirectory, new Date())
+      appendUsageEvent(options.usageLogDirectory, "start", new Date())
         .catch((error: unknown) => {
           console.warn(`agent-timeline: 利用記録を書けなかった (${String(error)})`);
         })

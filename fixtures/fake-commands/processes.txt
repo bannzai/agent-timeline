@@ -1,0 +1,7 @@
+ 1001     1 -zsh
+ 1101  1001 claude
+ 1002     1 -zsh
+ 1102  1002 node /usr/local/lib/node_modules/@openai/codex/bin/codex
+ 1003     1 -zsh
+ 1103  1003 codex resume --last
+ 1004     1 -zsh

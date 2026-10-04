@@ -1,5 +1,8 @@
 import { Hono } from "hono";
+import { type AgentKind, isRecord } from "./post.js";
 import { decodeTimelineCursor, type LogRoots, readThread, readTimeline } from "./timeline.js";
+import { findReplyTarget, type ReplyCommands, sendReplyToPane } from "./tmux.js";
+import { appendUsageEvent } from "./usage-log.js";
 
 // タイムラインの 1 画面に並ぶ件数より多く、1 回の応答でログを読む量を抑えられる件数にするため。
 const timelineDefaultLimit = 50;
@@ -7,9 +10,35 @@ const timelineDefaultLimit = 50;
 const timelineMaxLimit = 200;
 // サーバーは 127.0.0.1 だけで待ち受けるため、正しいリクエストの Host はこのどちらかになる。
 const localHostnames = new Set(["127.0.0.1", "localhost"]);
+// 1 行の指示として十分な長さで、tmux に渡す 1 つの引数が OS の上限 (Linux は 128 KiB) に届かない長さとして選んだ。
+const replyTextMaxLength = 10_000;
+
+/** createApp に渡す設定。 */
+export interface AppOptions {
+  /** 読むセッションのログのルート。 */
+  logRoots: LogRoots;
+  /** 利用記録 (usage.jsonl) を置くディレクトリ。 */
+  usageLogDirectory: string;
+  /** 返信の送信に使う tmux と ps。 */
+  replyCommands: ReplyCommands;
+}
+
+/** URL の agent の部分が、知っている agent の種類か。 */
+function isAgentKind(agent: string): agent is AgentKind {
+  return agent === "claude-code" || agent === "codex";
+}
+
+/** Origin ヘッダーが、リクエストの URL と同じオリジンか。Origin が無い・読めない (`null` など) 時は false を返す。 */
+function isSameOrigin(origin: string | undefined, requestUrl: string): boolean {
+  return (
+    origin !== undefined &&
+    URL.canParse(origin) &&
+    new URL(origin).origin === new URL(requestUrl).origin
+  );
+}
 
 /** agent-timeline の HTTP API を返す。静的ファイルの配信と待ち受けを含まないため、テストから直接呼べる。 */
-export function createApp(logRoots: LogRoots): Hono {
+export function createApp(options: AppOptions): Hono {
   const app = new Hono();
 
   // 会話のログを返すため、Host がこのマシンでないリクエストは拒否する。ブラウザで開いた別のサイトが
@@ -36,20 +65,79 @@ export function createApp(logRoots: LogRoots): Hono {
     if (cursorText !== undefined && cursor === null) {
       return c.json({ error: "cursor が読めない" }, 400);
     }
-    return c.json(await readTimeline(logRoots, { limit, cursor }));
+    return c.json(await readTimeline(options.logRoots, { limit, cursor }));
   });
 
-  // 1 つのセッションの投稿を古い順に返す。
+  // 1 つのセッションの投稿を古い順に返す。`reply` は、このセッションへ返信できるかと、できない時の理由。
   app.get("/api/sessions/:agent/:sessionId/posts", async (c) => {
     const agent = c.req.param("agent");
-    if (agent !== "claude-code" && agent !== "codex") {
+    if (!isAgentKind(agent)) {
       return c.json({ error: "セッションが見つからない" }, 404);
     }
-    const posts = await readThread(logRoots, agent, c.req.param("sessionId"));
+    const posts = await readThread(options.logRoots, agent, c.req.param("sessionId"));
     if (posts === null) {
       return c.json({ error: "セッションが見つからない" }, 404);
     }
-    return c.json({ posts });
+    // 作業ディレクトリはセッションの途中で変わりうるため、最後の発言の時点のものを使う。
+    const projectDirectory = posts.at(-1)?.session.projectDirectory ?? null;
+    return c.json({
+      posts,
+      reply: await findReplyTarget(options.replyCommands, agent, projectDirectory),
+    });
+  });
+
+  // 本文 (`{"text": "..."}`) を、セッションが動いている tmux の pane へ入力して Enter を送る。
+  app.post("/api/sessions/:agent/:sessionId/replies", async (c) => {
+    // 返信はこのマシンでコマンドを打つのと同じ力を持つため、このアプリの画面からのリクエストだけを受け付ける (documents/PROJECT.md「制約」)。
+    // Host は上の検査でこのマシンに限られるため、Origin が Host と同じなら、このマシンのこのアプリの画面からのリクエストになる。
+    // 待ち受けのポートではなく Host と比べるのは、`npm run dev` では画面と API が vite の同じオリジンから届くため。
+    if (!isSameOrigin(c.req.header("Origin"), c.req.url)) {
+      return c.json({ error: "Origin がこのアプリではない" }, 403);
+    }
+    // 別のサイトがプリフライトなしで送れる形式 (フォームの送信・text/plain) を受け付けない。
+    if (c.req.header("Content-Type")?.split(";")[0]?.trim().toLowerCase() !== "application/json") {
+      return c.json({ error: "Content-Type は application/json にする" }, 415);
+    }
+    const body: unknown = await c.req.json().catch(() => undefined);
+    const text = isRecord(body) ? body.text : undefined;
+    if (typeof text !== "string" || text.trim() === "" || text.length > replyTextMaxLength) {
+      return c.json(
+        { error: `本文は 1 文字以上 ${replyTextMaxLength} 文字以下で送ってください` },
+        400,
+      );
+    }
+    // 改行は tmux に渡ると Enter として届き、制御文字は端末やエージェントの操作になるため、1 行の文字だけを受け付ける。
+    if (/\p{Cc}/u.test(text)) {
+      return c.json({ error: "改行や制御文字を含む本文は送れません" }, 400);
+    }
+
+    const agent = c.req.param("agent");
+    if (!isAgentKind(agent)) {
+      return c.json({ error: "セッションが見つからない" }, 404);
+    }
+    const posts = await readThread(options.logRoots, agent, c.req.param("sessionId"));
+    if (posts === null) {
+      return c.json({ error: "セッションが見つからない" }, 404);
+    }
+    // スレッドを開いた後に pane が閉じられた・別のプロセスに変わった時に送らないため、送る直前に対応付けをやり直す。
+    const replyTarget = await findReplyTarget(
+      options.replyCommands,
+      agent,
+      posts.at(-1)?.session.projectDirectory ?? null,
+    );
+    if (!replyTarget.available) {
+      return c.json({ error: replyTarget.reason }, 409);
+    }
+    if (!(await sendReplyToPane(options.replyCommands, replyTarget.paneId, text))) {
+      return c.json({ error: "tmux に送れませんでした" }, 502);
+    }
+    // 利用記録は判定のための計測で、本文は書かない。書けなくても返信は届いているため、警告だけ出して成功を返す。
+    await appendUsageEvent(options.usageLogDirectory, "reply", new Date()).catch(
+      (error: unknown) => {
+        console.warn(`agent-timeline: 利用記録を書けなかった (${String(error)})`);
+      },
+    );
+    return c.json({ status: "sent" });
   });
 
   return app;
