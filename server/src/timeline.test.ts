@@ -1,0 +1,79 @@
+import { cp, mkdtemp, readdir, rm, utimes } from "node:fs/promises";
+import os from "node:os";
+import path from "node:path";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { type LogRoots, logRootsFromEnv, readTimeline } from "./timeline.js";
+
+const claudeCart = "3f2a9c1e-5b7d-4e8a-9c6f-1a2b3c4d5e6f";
+const claudeReadme = "8d4e2f6a-1c3b-4a5d-8e7f-9a0b1c2d3e4f";
+const codexUnit = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
+const codexTax = "0199b2c3-d4e5-7f6a-9b0c-1d2e3f4a5b6c";
+
+/** 最終更新の日時を変えられるよう、fixture を写した一時ディレクトリ。 */
+let temporaryDirectory: string;
+/** temporaryDirectory に写した fixture のログのルート。 */
+let copiedLogRoots: LogRoots;
+
+/** 写した fixture のうち、ファイル名がセッション ID で終わるログのファイルの最終更新の日時を変える。 */
+async function setModifiedAt(sessionId: string, timestamp: string): Promise<void> {
+  for (const logRoot of Object.values(copiedLogRoots)) {
+    for (const relativePath of await readdir(logRoot, { recursive: true })) {
+      if (relativePath.endsWith(`${sessionId}.jsonl`)) {
+        await utimes(path.join(logRoot, relativePath), new Date(timestamp), new Date(timestamp));
+      }
+    }
+  }
+}
+
+beforeEach(async () => {
+  temporaryDirectory = await mkdtemp(path.join(os.tmpdir(), "agent-timeline-"));
+  // vitest.config.ts が、ログのルートの環境変数を fixtures/ の合成セッションに向けている。
+  for (const [name, fixtureRoot] of Object.entries(logRootsFromEnv(process.env))) {
+    await cp(fixtureRoot, path.join(temporaryDirectory, name), { recursive: true });
+  }
+  copiedLogRoots = {
+    claudeCodeProjectsDirectory: path.join(temporaryDirectory, "claudeCodeProjectsDirectory"),
+    codexSessionsDirectory: path.join(temporaryDirectory, "codexSessionsDirectory"),
+  };
+});
+
+afterEach(async () => {
+  await rm(temporaryDirectory, { recursive: true, force: true });
+});
+
+describe("readTimeline", () => {
+  it("最終更新が投稿の日時以上の時、どの limit でも全件の先頭と同じページを返す", async () => {
+    // 各ファイルの最終更新を、そのファイルの最後の投稿の日時にする。
+    await setModifiedAt(claudeCart, "2026-10-01T09:10:20.000Z");
+    await setModifiedAt(claudeReadme, "2026-10-02T10:30:22.000Z");
+    await setModifiedAt(codexUnit, "2026-10-01T09:00:10.100Z");
+    await setModifiedAt(codexTax, "2026-10-02T10:00:15.000Z");
+    const allPosts = (await readTimeline(copiedLogRoots, { limit: 200, cursor: null })).posts;
+
+    expect(allPosts).toHaveLength(13);
+    for (let limit = 1; limit <= allPosts.length; limit++) {
+      const page = await readTimeline(copiedLogRoots, { limit, cursor: null });
+      expect(page.posts).toEqual(allPosts.slice(0, limit));
+    }
+  });
+
+  it("最終更新がページに入る投稿より古いファイルは読まない", async () => {
+    // claudeCart だけ、中の投稿 (2026-10-01T09:10) より古い最終更新にする。読めばページの 7 件目は
+    // claudeCart の投稿 (09:10:20) になり、読まなければ codexUnit の投稿 (09:00:10) になる。
+    await setModifiedAt(claudeCart, "2026-01-01T00:00:00.000Z");
+    await setModifiedAt(claudeReadme, "2026-10-02T11:00:00.000Z");
+    await setModifiedAt(codexUnit, "2026-10-01T09:05:00.000Z");
+    await setModifiedAt(codexTax, "2026-10-02T10:10:00.000Z");
+    const page = await readTimeline(copiedLogRoots, { limit: 7, cursor: null });
+
+    expect(page.posts.map((post) => [post.session.sessionId, post.text])).toEqual([
+      [claudeReadme, "README に npm start の手順を足しました"],
+      [claudeReadme, 'Bash {"command":"cat package.json"}'],
+      [claudeReadme, "README に起動方法を書いて"],
+      [codexTax, "Math.floor で切り捨てるように直しました"],
+      [codexTax, 'shell {"command":["rg","tax"]}'],
+      [codexTax, "消費税の端数を切り捨てにして"],
+      [codexUnit, "--unit オプションを追加しました"],
+    ]);
+  });
+});
