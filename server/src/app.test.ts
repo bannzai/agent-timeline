@@ -190,6 +190,21 @@ describe("GET /api/posts", () => {
   });
 });
 
+describe("GET /api/events", () => {
+  it("Server-Sent Events でつなぎ、見張りの基準ができると ready を送る", async () => {
+    const response = await app.request("/api/events");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toMatch(/^text\/event-stream/);
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    const firstChunk = await reader?.read();
+    expect(new TextDecoder().decode(firstChunk?.value)).toBe("event: ready\ndata: {}\n\n");
+    // ブラウザが閉じた時と同じく読むのをやめ、見張りの購読をやめさせる。
+    await reader?.cancel();
+  });
+});
+
 describe("GET /api/sessions/:agent/:sessionId/posts", () => {
   it("Claude Code のセッションの発言だけを古い順に返す", async () => {
     const response = await app.request(`/api/sessions/claude-code/${claudeCart}/posts`);

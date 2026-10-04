@@ -33,6 +33,11 @@ export interface TimelinePage {
   nextCursor: string | null;
 }
 
+/** 自動更新の API (`/api/events`) が送る `sessions-changed` の data。sessions は、ログが追記されたか新しく現れたセッション。 */
+export interface SessionsChangedEvent {
+  sessions: Pick<PostSession, "agent" | "sessionId">[];
+}
+
 /** 1 つのセッションのログのファイル。 */
 export interface SessionLogFile {
   agent: AgentKind;
@@ -64,6 +69,22 @@ export function postId(
     String(lineIndex).padStart(9, "0"),
     String(blockIndex).padStart(3, "0"),
   ].join(":");
+}
+
+/** 文字列を UTF-16 のコード単位の順に比べる。ISO 8601 の UTC の日時は、この順が日時の前後と一致する。 */
+export function compareText(a: string, b: string): number {
+  return a < b ? -1 : a > b ? 1 : 0;
+}
+
+/**
+ * 投稿を新しい順に並べる比較関数。同じ日時の投稿 (1 行のログが本文とツール呼び出しを持つ時など) は id で順序を決め、
+ * 一覧のカーソルの境界で投稿が抜けたり重なったりしないようにする。
+ */
+export function compareNewestFirst(
+  a: Pick<Post, "timestamp" | "id">,
+  b: Pick<Post, "timestamp" | "id">,
+): number {
+  return compareText(b.timestamp, a.timestamp) || compareText(b.id, a.id);
 }
 
 /** JSON の文字列を読む。読めなければ undefined を返す。 */

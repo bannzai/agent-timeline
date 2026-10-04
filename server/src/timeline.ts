@@ -5,6 +5,8 @@ import { listClaudeCodeSessionLogFiles, parseClaudeCodeSessionLog } from "./clau
 import { listCodexSessionLogFiles, parseCodexSessionLog } from "./codex-log.js";
 import {
   type AgentKind,
+  compareNewestFirst,
+  compareText,
   parseJson,
   type Post,
   type SessionLogFile,
@@ -51,21 +53,8 @@ export function decodeTimelineCursor(cursorText: string): TimelineCursor | null 
   return typeof timestamp === "string" && typeof id === "string" ? { timestamp, id } : null;
 }
 
-/** 文字列を UTF-16 のコード単位の順に比べる。ISO 8601 の UTC の日時は、この順が日時の前後と一致する。 */
-function compareText(a: string, b: string): number {
-  return a < b ? -1 : a > b ? 1 : 0;
-}
-
-/**
- * 新しい順に並べる比較関数。同じ日時の投稿 (1 行のログが本文とツール呼び出しを持つ時など) は id で順序を決め、
- * カーソルの境界で投稿が抜けたり重なったりしないようにする。
- */
-function compareNewestFirst(a: TimelineCursor, b: TimelineCursor): number {
-  return compareText(b.timestamp, a.timestamp) || compareText(b.id, a.id);
-}
-
 /** 両方の agent のセッションのログのファイルを返す。 */
-async function listSessionLogFiles(logRoots: LogRoots): Promise<SessionLogFile[]> {
+export async function listSessionLogFiles(logRoots: LogRoots): Promise<SessionLogFile[]> {
   const [claudeCodeFiles, codexFiles] = await Promise.all([
     listClaudeCodeSessionLogFiles(logRoots.claudeCodeProjectsDirectory),
     listCodexSessionLogFiles(logRoots.codexSessionsDirectory),
