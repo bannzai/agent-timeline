@@ -92,6 +92,8 @@ describe("Host の検査", () => {
   it("Host が別のマシンのリクエストは 403 を返す", async () => {
     expect((await app.request("http://attacker.example/api/posts")).status).toBe(403);
     expect((await app.request("http://attacker.example:7878/api/health")).status).toBe(403);
+    // ログの変化の知らせも会話の有無を漏らすため、知らせを始める前に拒否する。
+    expect((await app.request("http://attacker.example/api/events")).status).toBe(403);
   });
 });
 
