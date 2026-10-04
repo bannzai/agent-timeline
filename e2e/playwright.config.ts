@@ -18,6 +18,11 @@ export default defineConfig({
     cwd: "..",
     url: `http://127.0.0.1:${port}/api/health`,
     reuseExistingServer: false,
-    env: { AGENT_TIMELINE_PORT: String(port) },
+    // ログのルートは手書きの合成セッションにする (.claude/rules/synthetic-fixtures.md)。サーバーの作業ディレクトリ (cwd) はリポジトリのルート。
+    env: {
+      AGENT_TIMELINE_PORT: String(port),
+      AGENT_TIMELINE_CLAUDE_PROJECTS_DIR: "fixtures/claude/projects",
+      AGENT_TIMELINE_CODEX_SESSIONS_DIR: "fixtures/codex/sessions",
+    },
   },
 });
