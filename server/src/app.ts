@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { type AgentKind, isRecord } from "./post.js";
 import { decodeTimelineCursor, type LogRoots, readThread, readTimeline } from "./timeline.js";
-import { findReplyTarget, type ReplyCommands, sendReplyToPane } from "./tmux.js";
+import { findReplyTarget, type ReplyCommands, sendReply } from "./tmux.js";
 import { appendUsageEvent } from "./usage-log.js";
 
 // タイムラインの 1 画面に並ぶ件数より多く、1 回の応答でログを読む量を抑えられる件数にするため。
@@ -40,6 +40,8 @@ function isSameOrigin(origin: string | undefined, requestUrl: string): boolean {
 /** agent-timeline の HTTP API を返す。静的ファイルの配信と待ち受けを含まないため、テストから直接呼べる。 */
 export function createApp(options: AppOptions): Hono {
   const app = new Hono();
+  // 最後に受け付けた返信の送信。次の返信は、これが終わってから送る。
+  let replySendQueue: Promise<unknown> = Promise.resolve();
 
   // 会話のログを返すため、Host がこのマシンでないリクエストは拒否する。ブラウザで開いた別のサイトが
   // 自分のドメインを 127.0.0.1 に向け直して (DNS rebinding) 同じオリジンとして読むのを防ぐ (documents/PROJECT.md「制約」)。
@@ -120,16 +122,17 @@ export function createApp(options: AppOptions): Hono {
       return c.json({ error: "セッションが見つからない" }, 404);
     }
     // スレッドを開いた後に pane が閉じられた・別のプロセスに変わった時に送らないため、送る直前に対応付けをやり直す。
-    const replyTarget = await findReplyTarget(
-      options.replyCommands,
-      agent,
-      posts.at(-1)?.session.projectDirectory ?? null,
+    // 同時に届いた返信は 1 つずつ送る。並べて送ると、2 つの本文が Enter の前に同じ pane の入力欄でつながりうるため。
+    const replySend = replySendQueue.then(() =>
+      sendReply(options.replyCommands, agent, posts.at(-1)?.session.projectDirectory ?? null, text),
     );
-    if (!replyTarget.available) {
-      return c.json({ error: replyTarget.reason }, 409);
+    replySendQueue = replySend.catch(() => undefined);
+    const replySendResult = await replySend;
+    if (replySendResult.status === "unavailable") {
+      return c.json({ error: replySendResult.reason }, 409);
     }
-    if (!(await sendReplyToPane(options.replyCommands, replyTarget.paneId, text))) {
-      return c.json({ error: "tmux に送れませんでした" }, 502);
+    if (replySendResult.status === "failed") {
+      return c.json({ error: replySendResult.reason }, 502);
     }
     // 利用記録は判定のための計測で、本文は書かない。書けなくても返信は届いているため、警告だけ出して成功を返す。
     await appendUsageEvent(options.usageLogDirectory, "reply", new Date()).catch(

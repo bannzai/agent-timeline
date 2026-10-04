@@ -147,10 +147,10 @@ describe("スレッドの API の返信できるか", () => {
     await replaceFakeTables(context, {
       panes: ["%1\t1001\t/home/dev/acme-shop"],
       processes: [
-        " 1001     1 -zsh",
-        " 1101  1001 claude",
-        " 1201  1101 /bin/zsh -c codex exec review",
-        " 1202  1201 codex exec review",
+        " 1001     1 Ss   -zsh",
+        " 1101  1001 S+   claude",
+        " 1201  1101 S+   /bin/zsh -c codex exec review",
+        " 1202  1201 S+   codex exec review",
       ],
     });
 
@@ -159,6 +159,25 @@ describe("スレッドの API の返信できるか", () => {
     );
     expect((await requestReplyTarget(context.app, `codex/${codexTax}`)).available).toBe(false);
   });
+
+  it.each([
+    ["Ctrl+Z で止めた", " 1101  1001 T    claude"],
+    ["裏で動かした", " 1101  1001 S    claude"],
+  ])(
+    "%s agent の pane は、キー入力を受け取るのがシェルのため送り先にしない",
+    async (_, agentProcessLine) => {
+      const context = await prepareReplyTest();
+      await replaceFakeTables(context, {
+        panes: ["%1\t1001\t/home/dev/acme-shop"],
+        processes: [" 1001     1 Ss+  -zsh", agentProcessLine],
+      });
+
+      expect(await requestReplyTarget(context.app, `claude-code/${claudeCart}`)).toEqual({
+        available: false,
+        reason: "このセッションが動いている tmux の pane が見つかりません",
+      });
+    },
+  );
 
   it("tmux のサーバーが動いていない時は、返信できない理由を返す", async () => {
     const { app } = await prepareReplyTest();
@@ -191,6 +210,7 @@ describe("POST /api/sessions/:agent/:sessionId/replies", () => {
     ["バッククォートのコマンド置換", "`touch {dir}/backquote` を見て"],
     ["- で始まる本文", "-t %2 Enter"],
     ["tmux のキーの名前", "C-c"],
+    ["途中の \\;", "a\\;b を直して"],
   ])("%sを含む本文も、シェルに解釈させず本文そのままの 1 つの引数で渡す", async (_, template) => {
     const { app, tmuxCallsFile, temporaryDirectory } = await prepareReplyTest();
     const text = template.replace("{dir}", temporaryDirectory);
@@ -302,12 +322,83 @@ describe("POST /api/sessions/:agent/:sessionId/replies", () => {
     // Claude Code を終えて、同じ pane でエディタを開いた。
     await replaceFakeTables(context, {
       panes: ["%1\t1001\t/home/dev/acme-shop"],
-      processes: [" 1001     1 -zsh", " 1301  1001 vim src/cart.ts"],
+      processes: [" 1001     1 Ss   -zsh", " 1301  1001 S+   vim src/cart.ts"],
     });
 
     expect((await postReply(context.app, `claude-code/${claudeCart}`, replyText)).status).toBe(409);
     expect(await readSendKeysCalls(context.tmuxCallsFile)).toEqual([]);
   });
+
+  it("本文を入力している間に agent が止められたら、Enter を送らず 502 を返す", async () => {
+    const context = await prepareReplyTest();
+
+    const responsePromise = postReply(context.app, `claude-code/${claudeCart}`, replyText);
+    // 本文の入力が偽の tmux に届いた後、Enter の前に Claude Code を Ctrl+Z で止めた。
+    await expect.poll(() => readSendKeysCalls(context.tmuxCallsFile)).toHaveLength(1);
+    await replaceFakeTables(context, {
+      panes: ["%1\t1001\t/home/dev/acme-shop"],
+      processes: [" 1001     1 Ss+  -zsh", " 1101  1001 T    claude"],
+    });
+    const response = await responsePromise;
+
+    expect(response.status).toBe(502);
+    expect(await response.json()).toEqual({
+      error: "送る途中で pane のエージェントが変わったため Enter を送りませんでした",
+    });
+    expect(await readSendKeysCalls(context.tmuxCallsFile)).toEqual([
+      ["send-keys", "-t", "%1", "-l", "--", replyText],
+    ]);
+  });
+
+  it("同時に届いた返信は、本文と Enter の組を 1 つずつ順に送る", async () => {
+    const { app, tmuxCallsFile } = await prepareReplyTest();
+
+    const responses = await Promise.all([
+      postReply(app, `claude-code/${claudeCart}`, "1 つ目の指示"),
+      postReply(app, `claude-code/${claudeCart}`, "2 つ目の指示"),
+    ]);
+
+    expect(responses.map((response) => response.status)).toEqual([200, 200]);
+    // どちらが先に送られるかは決めないが、本文の次は必ずその本文の Enter になる。
+    const sendKeysCalls = await readSendKeysCalls(tmuxCallsFile);
+    const firstText = sendKeysCalls[0]?.[5] ?? "";
+    expect(sendKeysCalls).toEqual([
+      ["send-keys", "-t", "%1", "-l", "--", firstText],
+      ["send-keys", "-t", "%1", "Enter"],
+      [
+        "send-keys",
+        "-t",
+        "%1",
+        "-l",
+        "--",
+        firstText === "1 つ目の指示" ? "2 つ目の指示" : "1 つ目の指示",
+      ],
+      ["send-keys", "-t", "%1", "Enter"],
+    ]);
+    expect(firstText === "1 つ目の指示" || firstText === "2 つ目の指示").toBe(true);
+  });
+
+  it.each([
+    ["末尾の ;", "合計を直して;", "合計を直して\\;"],
+    ["末尾の \\;", "a\\;", "a\\\\;"],
+    ["末尾の ;;", "x;;", "x;\\;"],
+  ])(
+    "%sは tmux にコマンドの区切りとして消されないよう、最後の ; の前に \\ を足して渡す",
+    async (_, text, tmuxArgument) => {
+      const { app, tmuxCallsFile } = await prepareReplyTest();
+
+      expect((await postReply(app, `claude-code/${claudeCart}`, text)).status).toBe(200);
+
+      expect((await readSendKeysCalls(tmuxCallsFile))[0]).toEqual([
+        "send-keys",
+        "-t",
+        "%1",
+        "-l",
+        "--",
+        tmuxArgument,
+      ]);
+    },
+  );
 
   it("無いセッション・知らない agent は 404 を返し、何も送らない", async () => {
     const { app, tmuxCallsFile } = await prepareReplyTest();

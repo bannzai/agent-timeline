@@ -38,9 +38,17 @@ interface TmuxPane {
 interface RunningProcess {
   pid: number;
   parentPid: number;
+  /** ps の stat (`S+` など)。`+` は、端末の手前のプロセスグループ (キー入力を受け取るもの) にいることを表す。 */
+  stat: string;
   /** 実行ファイルと引数を空白でつないだもの。 */
   args: string;
 }
+
+/** 返信の送信の結果。unavailable は送り先が無くて何も送らなかったこと、failed は送る途中で失敗したことを表す。 */
+export type ReplySendResult =
+  | { status: "sent" }
+  | { status: "unavailable"; reason: string }
+  | { status: "failed"; reason: string };
 
 /**
  * 環境変数から返信に使うコマンドを決める。テストと CI は、ここで偽のコマンドに差し替える。
@@ -86,15 +94,22 @@ async function listTmuxPanes(tmux: string): Promise<TmuxPane[] | null> {
 /** 動いている全プロセスを返す。ps を実行できない時は null を返す。 */
 async function listRunningProcesses(ps: string): Promise<RunningProcess[] | null> {
   // -ww は、長い引数を端末の幅で切らずに全文を出す。
-  const stdout = await runCommand(ps, ["-A", "-ww", "-o", "pid=,ppid=,args="]);
+  const stdout = await runCommand(ps, ["-A", "-ww", "-o", "pid=,ppid=,stat=,args="]);
   if (stdout === null) {
     return null;
   }
   return stdout.split("\n").flatMap((line) => {
-    const match = /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(line);
+    const match = /^\s*(\d+)\s+(\d+)\s+(\S+)\s+(.*)$/.exec(line);
     return match === null
       ? []
-      : [{ pid: Number(match[1]), parentPid: Number(match[2]), args: match[3] ?? "" }];
+      : [
+          {
+            pid: Number(match[1]),
+            parentPid: Number(match[2]),
+            stat: match[3] ?? "",
+            args: match[4] ?? "",
+          },
+        ];
   });
 }
 
@@ -135,9 +150,13 @@ export async function findReplyTarget(
       path.resolve(pane.paneCurrentPath) === path.resolve(projectDirectory) &&
       // pane のシェルと、その直下のプロセスだけを見る。agent がツールとして起動した別の agent (Claude Code から実行した codex など) を、
       // pane で動いている agent と取り違えないため。
+      // agent が手前にいる (キー入力を受け取る) ことも確かめる。止めた (Ctrl+Z) agent や裏で動かした agent の pane では、
+      // 入力を受け取るのはシェルで、送った本文がコマンドとして実行されてしまうため。
       runningProcesses.some(
         (runningProcess) =>
           (runningProcess.pid === pane.panePid || runningProcess.parentPid === pane.panePid) &&
+          runningProcess.stat.includes("+") &&
+          !runningProcess.stat.startsWith("T") &&
           processAgent(runningProcess.args) === agent,
       ),
   );
@@ -155,17 +174,52 @@ export async function findReplyTarget(
 }
 
 /**
- * pane へ本文を 1 行の文字として入力し、Enter を送る。送れた時は true、tmux が失敗した時は false を返す。
- * 本文は引数の 1 つとしてそのまま渡し、シェルにも tmux のキーの名前にも解釈させない (-l は文字のまま入力、-- は `-` で始まる本文を tmux のオプションにしない)。
+ * 本文を、tmux が文字のまま入力する 1 つの引数にする。tmux は引数の末尾の `;` をコマンドの区切りとして取り除き、
+ * 末尾の `\;` を `;` にするため、末尾が `;` の本文だけ最後の `;` の前に `\` を足す (2026-10-05 に tmux 3.6a の send-keys -l で確認)。
  */
-export async function sendReplyToPane(
+function tmuxLiteralArgument(text: string): string {
+  return text.endsWith(";") ? `${text.slice(0, -1)}\\;` : text;
+}
+
+/**
+ * セッションの送り先の pane を求め、本文を 1 行の文字として入力して Enter を送る。
+ * 本文は引数の 1 つとして渡し、シェルにも tmux のキーの名前にも解釈させない (-l は文字のまま入力、-- は `-` で始まる本文を tmux のオプションにしない)。
+ * 同時に呼ばない前提で、呼び出し側が 1 つずつ順に呼ぶ (2 つの本文と Enter が混ざらないため)。
+ */
+export async function sendReply(
   commands: ReplyCommands,
-  paneId: string,
+  agent: AgentKind,
+  projectDirectory: string | null,
   text: string,
-): Promise<boolean> {
-  if ((await runCommand(commands.tmux, ["send-keys", "-t", paneId, "-l", "--", text])) === null) {
-    return false;
+): Promise<ReplySendResult> {
+  const replyTarget = await findReplyTarget(commands, agent, projectDirectory);
+  if (!replyTarget.available) {
+    return { status: "unavailable", reason: replyTarget.reason };
+  }
+  const { paneId } = replyTarget;
+  if (
+    (await runCommand(commands.tmux, [
+      "send-keys",
+      "-t",
+      paneId,
+      "-l",
+      "--",
+      tmuxLiteralArgument(text),
+    ])) === null
+  ) {
+    return { status: "failed", reason: "tmux に送れませんでした" };
   }
   await delay(enterDelayMs);
-  return (await runCommand(commands.tmux, ["send-keys", "-t", paneId, "Enter"])) !== null;
+  // 入力している間に agent が止められてシェルが手前に戻っていれば、Enter で本文がコマンドとして実行されるため、Enter の直前にも確かめる。
+  const replyTargetBeforeEnter = await findReplyTarget(commands, agent, projectDirectory);
+  if (!replyTargetBeforeEnter.available || replyTargetBeforeEnter.paneId !== paneId) {
+    return {
+      status: "failed",
+      reason: "送る途中で pane のエージェントが変わったため Enter を送りませんでした",
+    };
+  }
+  if ((await runCommand(commands.tmux, ["send-keys", "-t", paneId, "Enter"])) === null) {
+    return { status: "failed", reason: "tmux に送れませんでした" };
+  }
+  return { status: "sent" };
 }

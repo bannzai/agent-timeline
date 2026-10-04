@@ -155,6 +155,8 @@ function ReplyComposer({ agent, sessionId }: { agent: AgentKind; sessionId: stri
           aria-label="返信"
           placeholder="返信をポスト"
           value={text}
+          // 届いた時に入力を空にするため、送信中に書き足した文が送られないまま消えないよう、送信中は書き換えられなくする。
+          readOnly={sendState.status === "sending"}
           onChange={(event) => setText(event.target.value)}
           onKeyDown={(event) => {
             // 日本語入力の変換を確定する Enter で送らない。
