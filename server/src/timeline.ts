@@ -3,7 +3,13 @@ import os from "node:os";
 import path from "node:path";
 import { listClaudeCodeSessionLogFiles, parseClaudeCodeSessionLog } from "./claude-code-log.js";
 import { listCodexSessionLogFiles, parseCodexSessionLog } from "./codex-log.js";
-import { type AgentKind, parseJson, type Post, type SessionLogFile } from "./post.js";
+import {
+  type AgentKind,
+  parseJson,
+  type Post,
+  type SessionLogFile,
+  type TimelinePage,
+} from "./post.js";
 
 /** agent ごとのセッションのログのルートディレクトリ。 */
 export interface LogRoots {
@@ -15,12 +21,6 @@ export interface LogRoots {
 export interface TimelineCursor {
   timestamp: string;
   id: string;
-}
-
-/** 一覧の 1 ページ。nextCursor は続きがある時だけ持つ。 */
-export interface TimelinePage {
-  posts: Post[];
-  nextCursor: string | null;
 }
 
 /**

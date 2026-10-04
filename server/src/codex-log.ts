@@ -1,6 +1,7 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
 import {
+  contentItemText,
   isRecord,
   parseJson,
   type Post,
@@ -9,6 +10,7 @@ import {
   postTimestamp,
   type SessionLogFile,
   toolCallText,
+  toolResultText,
 } from "./post.js";
 
 // Codex のログの形式の知識は、このファイルの中だけに置く (documents/PROJECT.md「入力」)。
@@ -63,11 +65,6 @@ function isInjectedContext(text: string): boolean {
   return injectedContextPrefixes.some((prefix) => text.trimStart().startsWith(prefix));
 }
 
-/** message の content の要素の文。文を持たない要素は null を返す。 */
-function contentItemText(item: unknown): string | null {
-  return isRecord(item) && typeof item.text === "string" ? item.text : null;
-}
-
 /**
  * Codex のセッションのログ (JSONL の全文) を、古い順の投稿にする。
  * 人間の指示・agent の返答・ツール呼び出しだけを投稿にし、読めない行と知らない種類の行は読み飛ばす。
@@ -77,6 +74,8 @@ export function parseCodexSessionLog(sessionId: string, logText: string): Post[]
   // 作業ディレクトリとブランチは、セッションの始めの session_meta の行だけが持つ。
   let projectDirectory: string | null = null;
   let gitBranch: string | null = null;
+  // ツールの結果の行は、呼び出しの行の call_id を持つ。結果を呼び出しの投稿の toolResult に入れるため、call_id から引く。
+  const toolPostsByCallId = new Map<string, Post>();
 
   logText.split("\n").forEach((line, lineIndex) => {
     const entry = parseJson(line);
@@ -93,8 +92,16 @@ export function parseCodexSessionLog(sessionId: string, logText: string): Post[]
       }
       return;
     }
-    // event_msg・reasoning・ツールの結果などは投稿にしない。
+    // event_msg・reasoning などは投稿にしない。
     if (entry.type !== "response_item") {
+      return;
+    }
+    if (payload.type === "custom_tool_call_output" || payload.type === "function_call_output") {
+      const toolPost =
+        typeof payload.call_id === "string" ? toolPostsByCallId.get(payload.call_id) : undefined;
+      if (toolPost !== undefined) {
+        toolPost.toolResult = toolResultText(payload.output);
+      }
       return;
     }
     const timestamp = postTimestamp(entry.timestamp);
@@ -115,19 +122,24 @@ export function parseCodexSessionLog(sessionId: string, logText: string): Post[]
         .filter((itemText) => author === "agent" || !isInjectedContext(itemText))
         .join("\n\n");
       if (text.trim() !== "") {
-        posts.push({ id, session, author, text, timestamp });
+        posts.push({ id, session, author, text, toolResult: null, timestamp });
       }
     } else if (payload.type === "custom_tool_call" || payload.type === "function_call") {
       // custom_tool_call は引数を input に、function_call は JSON の文字列を arguments に持つ。
       const toolInput = payload.type === "custom_tool_call" ? payload.input : payload.arguments;
       if (typeof payload.name === "string" && typeof toolInput === "string") {
-        posts.push({
+        const toolPost: Post = {
           id,
           session,
           author: "tool",
           text: toolCallText(payload.name, toolInput),
+          toolResult: null,
           timestamp,
-        });
+        };
+        posts.push(toolPost);
+        if (typeof payload.call_id === "string") {
+          toolPostsByCallId.set(payload.call_id, toolPost);
+        }
       }
     }
   });

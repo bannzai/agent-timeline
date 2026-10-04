@@ -50,7 +50,7 @@ describe("readTimeline", () => {
     await setModifiedAt(codexTax, "2026-10-02T10:00:15.000Z");
     const allPosts = (await readTimeline(copiedLogRoots, { limit: 200, cursor: null })).posts;
 
-    expect(allPosts).toHaveLength(13);
+    expect(allPosts).toHaveLength(14);
     for (let limit = 1; limit <= allPosts.length; limit++) {
       const page = await readTimeline(copiedLogRoots, { limit, cursor: null });
       expect(page.posts).toEqual(allPosts.slice(0, limit));
