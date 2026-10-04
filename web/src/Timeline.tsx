@@ -88,12 +88,24 @@ export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession
     return () => observer.disconnect();
   }, [loadNextPage, loadState]);
 
+  // 新着を探す読み込みの最中か。
+  const checkingNewPostsRef = useRef(false);
+  // 新着を探す読み込みの最中に checkNewPosts が呼ばれたか。
+  const newPostsCheckRequestedRef = useRef(false);
+
   /**
    * 最新の投稿を読み、表示中の投稿にも新着にも無い投稿を新着に足す。何度呼んでも同じ投稿は 1 度しか新着にならない。
    * 読み込んだ範囲より古い投稿は、下まで読んだ時の続きの読み込みで並ぶため新着にしない。
-   * 失敗した時は、次の知らせで探し直すため何もしない。
+   * 失敗した時は、次の知らせで探し直すため何もしない。読み込みの最中に呼ばれた時は、終わった後で 1 度だけ探し直す。
+   * 読み込みが知らせの間隔より長くかかる時に、読み込みが積み重なってサーバーの負荷を増やすのを防ぐ。
+   * 型を書くのは、終わった後の探し直しで自分を呼び、型の推論が自分自身を参照するため。
    */
-  const checkNewPosts = useCallback(() => {
+  const checkNewPosts: () => void = useCallback(() => {
+    if (checkingNewPostsRef.current) {
+      newPostsCheckRequestedRef.current = true;
+      return;
+    }
+    checkingNewPostsRef.current = true;
     // 一覧の API が 1 回で返せる最も多い件数を読み、知らせの間隔 (約 1 秒) に増えた投稿を取りこぼさないようにする。
     // 1 回の間にこれより多くの投稿が増えると、溢れた分は読み直すまでタイムラインに出ない。
     fetch(`/api/posts?${new URLSearchParams({ limit: String(timelineMaxLimit) })}`)
@@ -121,7 +133,14 @@ export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession
             : [...previousNewPosts, ...arrivedPosts];
         });
       })
-      .catch(() => {});
+      .catch(() => {})
+      .finally(() => {
+        checkingNewPostsRef.current = false;
+        if (newPostsCheckRequestedRef.current) {
+          newPostsCheckRequestedRef.current = false;
+          checkNewPosts();
+        }
+      });
   }, []);
 
   // 最初のページを読んでから知らせを受ける。つながった時の読み直しで、最初のページの後に増えた投稿を拾う。

@@ -190,6 +190,81 @@ test("スレッドの読み込みが知らせの間隔より遅くても、追�
   );
 });
 
+test("新着を探す読み込みが知らせの間隔より遅くても、読み込みを積み重ねない", async ({
+  page,
+}, testInfo) => {
+  const fixturePosts = await requestTimelinePosts(page);
+  let inFlightCheckCount = 0;
+  let maxInFlightCheckCount = 0;
+  // 新着を探す読み込み (limit 付き) の応答を、サーバーの見張りの間隔 (1 秒) より遅らせ、同時に何本走るかを数える。
+  await page.route("**/api/posts*", async (route) => {
+    if (!new URL(route.request().url()).searchParams.has("limit")) {
+      await route.continue();
+      return;
+    }
+    inFlightCheckCount += 1;
+    maxInFlightCheckCount = Math.max(maxInFlightCheckCount, inFlightCheckCount);
+    await new Promise((resolve) => setTimeout(resolve, 1500));
+    await route.continue();
+    inFlightCheckCount -= 1;
+  });
+  await page.goto("/");
+  await expect(page.getByTestId("post")).toHaveCount(fixturePosts.length);
+
+  // 見張りの間隔より短い間隔で追記し続け、知らせが読み込みの最中に届き続ける状態にする。
+  for (let appendedLineCount = 1; appendedLineCount <= 10; appendedLineCount += 1) {
+    appendLogLines(claudeCodeLogPath(testInfo, "-home-dev-acme-shop", claudeCart), [
+      claudeCodeLogLine(
+        "assistant",
+        `2026-10-02T10:30:${String(30 + appendedLineCount).padStart(2, "0")}.000Z`,
+        "/home/dev/acme-shop",
+        `追記の ${appendedLineCount} 行目`,
+      ),
+    ]);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+  }
+
+  // 追記が止まった後は、最後の追記まで新着になる。
+  await expect(page.getByRole("button", { name: "10 件の新しい投稿を表示" })).toBeVisible({
+    timeout: 10_000,
+  });
+  expect(maxInFlightCheckCount).toBe(1);
+});
+
+test("タイムラインからスレッドを開いても知らせの接続は 1 本で、両方の画面が更新される", async ({
+  page,
+}, testInfo) => {
+  const eventsRequestUrls: string[] = [];
+  page.on("request", (request) => {
+    if (new URL(request.url()).pathname === "/api/events") {
+      eventsRequestUrls.push(request.url());
+    }
+  });
+  const fixturePosts = await requestTimelinePosts(page);
+  await page.goto("/");
+  await expect(page.getByTestId("post")).toHaveCount(fixturePosts.length);
+  // タイムラインは画面に残したまま隠れ、スレッドと一緒に知らせを受ける。
+  await page.getByTestId("post").filter({ hasText: "合計の計算を確認します" }).click();
+  await expect(page).toHaveURL(claudeCartThreadPath);
+  const threadPosts = page.getByTestId("thread-post");
+  await expect(threadPosts.first()).toBeVisible();
+  const threadPostCount = await threadPosts.count();
+
+  appendLogLines(claudeCodeLogPath(testInfo, "-home-dev-acme-shop", claudeCart), [
+    claudeCodeLogLine(
+      "assistant",
+      "2026-10-02T10:30:40.000Z",
+      "/home/dev/acme-shop",
+      "スレッドとタイムラインの両方に届く発言です",
+    ),
+  ]);
+
+  await expect(threadPosts).toHaveCount(threadPostCount + 1);
+  await page.getByRole("button", { name: "戻る" }).click();
+  await expect(page.getByRole("button", { name: "1 件の新しい投稿を表示" })).toBeVisible();
+  expect(eventsRequestUrls).toHaveLength(1);
+});
+
 test("新しいセッションのファイルを足すとその投稿がタイムラインに現れる", async ({
   page,
 }, testInfo) => {
