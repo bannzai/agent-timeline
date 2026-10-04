@@ -69,6 +69,66 @@ const codexNonInteractiveCommands = new Set([
   "features",
   "help",
 ]);
+// 次の引数を値に取るオプション。サブコマンドを探す時に、オプションの値をサブコマンドと取り違えないために読み飛ばす。
+// 値を省略できるオプション (`claude --resume` など) は含めない。上と同じ `--help` の Options で確認した。
+const claudeValueOptions = new Set([
+  "--add-dir",
+  "--agent",
+  "--agents",
+  "--allowedTools",
+  "--allowed-tools",
+  "--append-system-prompt",
+  "--autocompact",
+  "--betas",
+  "--debug-file",
+  "--disallowedTools",
+  "--disallowed-tools",
+  "--effort",
+  "--environment",
+  "--fallback-model",
+  "--file",
+  "--input-format",
+  "--json-schema",
+  "--max-budget-usd",
+  "--mcp-config",
+  "--model",
+  "-n",
+  "--name",
+  "--output-format",
+  "--permission-mode",
+  "--permission-prompts",
+  "--plugin-dir",
+  "--plugin-url",
+  "--remote-control-session-name-prefix",
+  "--session-id",
+  "--setting-sources",
+  "--settings",
+  "--system-prompt",
+  "--system-prompt-snapshot",
+  "--tools",
+]);
+const codexValueOptions = new Set([
+  "-c",
+  "--config",
+  "--enable",
+  "--disable",
+  "--remote",
+  "--remote-auth-token-env",
+  "-i",
+  "--image",
+  "-m",
+  "--model",
+  "--local-provider",
+  "-p",
+  "--profile",
+  "-s",
+  "--sandbox",
+  "-C",
+  "--cd",
+  "--add-dir",
+  "-a",
+  "--ask-for-approval",
+]);
 
 /** 返信の送信に使う外部のコマンドの実行ファイル。テストと CI は偽のコマンドに差し替える。 */
 export interface ReplyCommands {
@@ -185,14 +245,36 @@ function processAgent(args: string): AgentKind | null {
   const agentArgs = tokens.slice(isNodeScript ? 2 : 1);
   if (name === "claude") {
     return agentArgs.some((arg) => arg === "-p" || arg === "--print") ||
-      claudeNonInteractiveCommands.has(agentArgs[0] ?? "")
+      claudeNonInteractiveCommands.has(firstPositionalArg(agentArgs, claudeValueOptions) ?? "")
       ? null
       : "claude-code";
   }
   if (name === "codex") {
-    return codexNonInteractiveCommands.has(agentArgs[0] ?? "") ? null : "codex";
+    return codexNonInteractiveCommands.has(firstPositionalArg(agentArgs, codexValueOptions) ?? "")
+      ? null
+      : "codex";
   }
   return null;
+}
+
+/**
+ * 引数のうち、オプションでない最初のもの (サブコマンドか、指示の最初の語) を返す。無ければ undefined を返す。
+ * valueOptions のオプションは次の引数を値に取るため、その値を読み飛ばす (`--model=x` の形は 1 つの引数で終わる)。
+ */
+function firstPositionalArg(agentArgs: string[], valueOptions: Set<string>): string | undefined {
+  for (let argIndex = 0; argIndex < agentArgs.length; argIndex++) {
+    const arg = agentArgs[argIndex] ?? "";
+    if (arg === "--") {
+      return agentArgs[argIndex + 1];
+    }
+    if (!arg.startsWith("-")) {
+      return arg;
+    }
+    if (valueOptions.has(arg)) {
+      argIndex++;
+    }
+  }
+  return undefined;
 }
 
 /**

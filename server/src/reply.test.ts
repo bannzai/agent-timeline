@@ -186,6 +186,9 @@ describe("スレッドの API の返信できるか", () => {
     ["codex exec", "codex", codexTax, "codex exec 端数を直して"],
     ["npm の codex exec", "codex", codexTax, "node /usr/local/bin/codex exec 端数を直して"],
     ["codex review", "codex", codexTax, "codex review"],
+    ["オプションの後の codex exec", "codex", codexTax, "codex -m gpt-5 -c model=o3 exec 指示"],
+    ["= で値を渡したオプションの後の codex exec", "codex", codexTax, "codex --model=gpt-5 exec"],
+    ["オプションの後の claude mcp", "claude-code", claudeCart, "claude --model opus mcp list"],
   ])(
     "対話でない起動 (%s) の agent の pane は、端末の入力を読まないため送り先にしない",
     async (_, agent, sessionId, agentArgs) => {
@@ -207,6 +210,8 @@ describe("スレッドの API の返信できるか", () => {
     ["claude に指示を渡した起動", "claude-code", claudeCart, "claude 合計を直して"],
     ["codex resume", "codex", codexTax, "codex resume --last"],
     ["codex に指示を渡した起動", "codex", codexTax, "codex 端数を直して"],
+    ["オプションの後の codex resume", "codex", codexTax, "codex -m gpt-5 resume --last"],
+    ["値が exec のオプション", "codex", codexTax, "codex -p exec"],
   ])("対話の起動 (%s) の agent の pane は送り先にする", async (_, agent, sessionId, agentArgs) => {
     const context = await prepareReplyTest();
     await replaceFakeTables(context, {
