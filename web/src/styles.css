@@ -7,6 +7,7 @@
   --text-primary: #0f1419;
   --text-secondary: #536471;
   --border: #eff3f4;
+  --thread-line: #cfd9de;
   --accent: #1d9bf0;
   --accent-hover: rgba(29, 155, 240, 0.1);
   --tool-background: #f7f9f9;
@@ -22,6 +23,7 @@
     --text-primary: #e7e9ea;
     --text-secondary: #71767b;
     --border: #2f3336;
+    --thread-line: #333639;
     --accent-hover: rgba(29, 155, 240, 0.15);
     --tool-background: #16181c;
     --codex: #8b98a5;
@@ -386,7 +388,7 @@ button.tool-call:hover {
   width: 2px;
   min-height: 12px;
   margin-top: 4px;
-  background: var(--border);
+  background: var(--thread-line);
 }
 
 .thread-post-with-reply .post-main {

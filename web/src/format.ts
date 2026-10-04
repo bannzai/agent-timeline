@@ -54,5 +54,10 @@ export function collapsedText(text: string): string | null {
   if (text.length <= collapsedTextMaxLength && lines.length <= collapsedTextMaxLines) {
     return null;
   }
-  return lines.slice(0, collapsedTextMaxLines).join("\n").slice(0, collapsedTextMaxLength);
+  // 末尾の空行と空白を落とし、続きがあることを示す「…」を最後の文の直後に置けるようにする。
+  return lines
+    .slice(0, collapsedTextMaxLines)
+    .join("\n")
+    .slice(0, collapsedTextMaxLength)
+    .trimEnd();
 }

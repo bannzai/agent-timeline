@@ -32,6 +32,12 @@ describe("collapsedText", () => {
 
     expect(collapsedText(lines.join("\n"))).toBe(lines.slice(0, 8).join("\n"));
   });
+
+  it("省略した先頭の末尾の空行は落とす", () => {
+    const lines = ["1 行目", "2 行目", "", "", "", "", "", "", "9 行目"];
+
+    expect(collapsedText(lines.join("\n"))).toBe("1 行目\n2 行目");
+  });
 });
 
 describe("projectName", () => {
