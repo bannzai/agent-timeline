@@ -101,6 +101,8 @@ describe("Host の検査", () => {
   it("Host が別のマシンのリクエストは 403 を返す", async () => {
     expect((await app.request("http://attacker.example/api/posts")).status).toBe(403);
     expect((await app.request("http://attacker.example:7878/api/health")).status).toBe(403);
+    // ログの変化の知らせも会話の有無を漏らすため、知らせを始める前に拒否する。
+    expect((await app.request("http://attacker.example/api/events")).status).toBe(403);
   });
 });
 
@@ -200,6 +202,21 @@ describe("GET /api/posts", () => {
     expect((await app.request("/api/posts?limit=201")).status).toBe(400);
     expect((await app.request("/api/posts?limit=abc")).status).toBe(400);
     expect((await app.request("/api/posts?cursor=not-a-cursor")).status).toBe(400);
+  });
+});
+
+describe("GET /api/events", () => {
+  it("Server-Sent Events でつなぎ、見張りの基準ができると ready を送る", async () => {
+    const response = await app.request("/api/events");
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toMatch(/^text\/event-stream/);
+    const reader = response.body?.getReader();
+    expect(reader).toBeDefined();
+    const firstChunk = await reader?.read();
+    expect(new TextDecoder().decode(firstChunk?.value)).toBe("event: ready\ndata: {}\n\n");
+    // ブラウザが閉じた時と同じく読むのをやめ、見張りの購読をやめさせる。
+    await reader?.cancel();
   });
 });
 

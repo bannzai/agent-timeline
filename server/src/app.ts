@@ -1,15 +1,18 @@
 import { Hono } from "hono";
-import { type AgentKind, isRecord } from "./post.js";
+import { streamSSE } from "hono/streaming";
+import { createLogWatcher } from "./log-watcher.js";
+import { type AgentKind, isRecord, type SessionsChangedEvent, timelineMaxLimit } from "./post.js";
 import { decodeTimelineCursor, type LogRoots, readThread, readTimeline } from "./timeline.js";
 import { findReplyTarget, type ReplyCommands, sendReply } from "./tmux.js";
 import { appendUsageEvent } from "./usage-log.js";
 
 // タイムラインの 1 画面に並ぶ件数より多く、1 回の応答でログを読む量を抑えられる件数にするため。
 const timelineDefaultLimit = 50;
-// 画面が一度に描く件数として十分で、1 回の応答が大きくなりすぎない上限にするため。
-const timelineMaxLimit = 200;
 // サーバーは 127.0.0.1 だけで待ち受けるため、正しいリクエストの Host はこのどちらかになる。
 const localHostnames = new Set(["127.0.0.1", "localhost"]);
+// 発言が 1 秒ほどでタイムラインに流れ、流し見て遅れを感じない間隔にするため。
+// 1 回に見るのはファイルの一覧と大きさ・最終更新の日時だけで、ファイルの中身は読まない。
+const logPollIntervalMs = 1000;
 // 1 行の指示として十分な長さで、tmux に渡す 1 つの引数が OS の上限 (Linux は 128 KiB) に届かない長さとして選んだ。
 const replyTextMaxLength = 10_000;
 
@@ -40,6 +43,7 @@ function isSameOrigin(origin: string | undefined, requestUrl: string): boolean {
 /** agent-timeline の HTTP API を返す。静的ファイルの配信と待ち受けを含まないため、テストから直接呼べる。 */
 export function createApp(options: AppOptions): Hono {
   const app = new Hono();
+  const logWatcher = createLogWatcher(options.logRoots, logPollIntervalMs);
   // 最後に受け付けた返信の送信。次の返信は、これが終わってから送る。
   let replySendQueue: Promise<unknown> = Promise.resolve();
 
@@ -142,6 +146,26 @@ export function createApp(options: AppOptions): Hono {
     );
     return c.json({ status: "sent" });
   });
+
+  // ログの変化を Server-Sent Events で知らせる。見張りの基準ができた時に `ready` を送り、その後は
+  // ログが追記されたか新しく現れたセッションを `sessions-changed` で送る。画面は ready を受けたら読み直し、
+  // つながる前とつながっていない間の変化を拾う。
+  app.get("/api/events", (c) =>
+    streamSSE(c, async (stream) => {
+      const aborted = new Promise<void>((resolve) => stream.onAbort(resolve));
+      const unsubscribe = await logWatcher.subscribe((changedSessions) => {
+        void stream.writeSSE({
+          event: "sessions-changed",
+          data: JSON.stringify({ sessions: changedSessions } satisfies SessionsChangedEvent),
+        });
+      });
+      // ブラウザは data が空のイベントを届けないため、空のオブジェクトを入れる。
+      await stream.writeSSE({ event: "ready", data: "{}" });
+      // コールバックが終わるとつながりが閉じるため、ブラウザが閉じるまで待つ。
+      await aborted;
+      unsubscribe();
+    }),
+  );
 
   return app;
 }
