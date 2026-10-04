@@ -1,0 +1,48 @@
+import { describe, expect, it } from "vitest";
+import { collapsedText, projectName, relativeTimeText } from "./format";
+
+describe("relativeTimeText", () => {
+  const now = new Date("2026-06-15T12:00:00.000Z");
+
+  it.each([
+    ["2026-06-15T12:00:00.000Z", "0秒"],
+    ["2026-06-15T11:59:15.000Z", "45秒"],
+    ["2026-06-15T11:55:00.000Z", "5分"],
+    ["2026-06-15T09:00:00.000Z", "3時間"],
+    ["2026-06-13T12:00:00.000Z", "6月13日"],
+    ["2025-06-13T12:00:00.000Z", "2025年6月13日"],
+    // 端末の時計が遅れていて、投稿の日時が今より後になった時。
+    ["2026-06-15T12:00:30.000Z", "0秒"],
+  ])("%s は %s", (timestamp, expected) => {
+    expect(relativeTimeText(timestamp, now)).toBe(expected);
+  });
+});
+
+describe("collapsedText", () => {
+  it("短い本文は省略しない", () => {
+    expect(collapsedText("README に起動方法を書いて")).toBeNull();
+  });
+
+  it("280 文字を超える本文は先頭の 280 文字にする", () => {
+    expect(collapsedText("あ".repeat(281))).toBe("あ".repeat(280));
+  });
+
+  it("8 行を超える本文は先頭の 8 行にする", () => {
+    const lines = Array.from({ length: 9 }, (_, lineIndex) => `${lineIndex + 1} 行目`);
+
+    expect(collapsedText(lines.join("\n"))).toBe(lines.slice(0, 8).join("\n"));
+  });
+});
+
+describe("projectName", () => {
+  it("作業ディレクトリの最後の名前を返す", () => {
+    expect(
+      projectName({
+        agent: "codex",
+        sessionId: "session",
+        projectDirectory: "/home/dev/acme-shop/",
+        gitBranch: null,
+      }),
+    ).toBe("acme-shop");
+  });
+});
