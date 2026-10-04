@@ -51,13 +51,13 @@ export function absoluteTimeText(timestamp: string): string {
 /** 本文をタイムラインで省略して出す時の先頭。省略しなくてよい長さなら null を返す。 */
 export function collapsedText(text: string): string | null {
   const lines = text.split("\n");
-  if (text.length <= collapsedTextMaxLength && lines.length <= collapsedTextMaxLines) {
+  // 文字数は UTF-16 のコード単位ではなく文字 (コードポイント) で数え、絵文字を途中で切らないようにする。
+  if (Array.from(text).length <= collapsedTextMaxLength && lines.length <= collapsedTextMaxLines) {
     return null;
   }
   // 末尾の空行と空白を落とし、続きがあることを示す「…」を最後の文の直後に置けるようにする。
-  return lines
-    .slice(0, collapsedTextMaxLines)
-    .join("\n")
+  return Array.from(lines.slice(0, collapsedTextMaxLines).join("\n"))
     .slice(0, collapsedTextMaxLength)
+    .join("")
     .trimEnd();
 }

@@ -27,6 +27,11 @@ describe("collapsedText", () => {
     expect(collapsedText("あ".repeat(281))).toBe("あ".repeat(280));
   });
 
+  it("文字数を絵文字も 1 文字として数え、絵文字を途中で切らない", () => {
+    expect(collapsedText("😀".repeat(280))).toBeNull();
+    expect(collapsedText("😀".repeat(281))).toBe("😀".repeat(280));
+  });
+
   it("8 行を超える本文は先頭の 8 行にする", () => {
     const lines = Array.from({ length: 9 }, (_, lineIndex) => `${lineIndex + 1} 行目`);
 

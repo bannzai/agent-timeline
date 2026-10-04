@@ -94,7 +94,12 @@ export function postTimestamp(value: unknown): string | null {
 
 /** ツール呼び出しの投稿の本文を、ツールの名前と引数から作る。 */
 export function toolCallText(toolName: string, toolInput: string): string {
-  return `${toolName} ${toolInput}`.slice(0, toolCallTextMaxLength);
+  return sliceCharacters(`${toolName} ${toolInput}`, toolCallTextMaxLength);
+}
+
+/** 文の先頭の maxLength 文字を返す。UTF-16 のコード単位ではなく文字 (コードポイント) で数え、絵文字を途中で切らない。 */
+function sliceCharacters(text: string, maxLength: number): string {
+  return Array.from(text).slice(0, maxLength).join("");
 }
 
 /**
@@ -103,13 +108,15 @@ export function toolCallText(toolName: string, toolInput: string): string {
  */
 export function toolResultText(toolOutput: unknown): string | null {
   if (typeof toolOutput === "string") {
-    return toolOutput === "" ? null : toolOutput.slice(0, toolResultTextMaxLength);
+    return toolOutput === "" ? null : sliceCharacters(toolOutput, toolResultTextMaxLength);
   }
   if (!Array.isArray(toolOutput)) {
     return null;
   }
   const itemTexts = toolOutput.map(contentItemText).filter((itemText) => itemText !== null);
-  return itemTexts.length === 0 ? null : itemTexts.join("\n").slice(0, toolResultTextMaxLength);
+  return itemTexts.length === 0
+    ? null
+    : sliceCharacters(itemTexts.join("\n"), toolResultTextMaxLength);
 }
 
 /** 発言やツールの結果の配列の要素 (`{ type, text }`) の文。文を持たない要素は null を返す。 */

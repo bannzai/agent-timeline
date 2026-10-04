@@ -1,5 +1,11 @@
 import { describe, expect, it } from "vitest";
-import { postId, toolResultText } from "./post.js";
+import { postId, toolCallText, toolResultText } from "./post.js";
+
+describe("toolCallText", () => {
+  it("ツールの名前と引数を 300 文字までにし、絵文字を途中で切らない", () => {
+    expect(toolCallText("Write", "😀".repeat(400))).toBe(`Write ${"😀".repeat(294)}`);
+  });
+});
 
 describe("toolResultText", () => {
   it("文字列の結果と、text を持つ要素の配列の結果を文にする", () => {
@@ -13,8 +19,9 @@ describe("toolResultText", () => {
     ).toBe("1 行目\n2 行目");
   });
 
-  it("500 文字を超える結果は先頭の 500 文字にする", () => {
+  it("500 文字を超える結果は先頭の 500 文字にし、絵文字を途中で切らない", () => {
     expect(toolResultText("あ".repeat(501))).toBe("あ".repeat(500));
+    expect(toolResultText("😀".repeat(501))).toBe("😀".repeat(500));
   });
 
   it.each([
