@@ -11,7 +11,7 @@
   "scripts": {
     "dev": "concurrently --names server,web \"tsx watch server/src/index.ts\" \"vite\"",
     "build": "vite build && tsc -p tsconfig.server.build.json",
-    "start": "node dist/server/index.js",
+    "start": "npm run build && node dist/server/index.js",
     "typecheck": "tsc -p tsconfig.server.json && tsc -p tsconfig.web.json && tsc -p e2e",
     "lint": "eslint .",
     "format": "prettier --write .",
