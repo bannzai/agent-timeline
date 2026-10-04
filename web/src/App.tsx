@@ -1,9 +1,9 @@
 import { useEffect, useState } from "react";
 
-/** Whether the local server answered: "checking" until the first response, then its status or "unreachable". */
+/** 手元のサーバーに届いたか。最初の応答までは "checking"、以後は応答の成否。 */
 type ServerStatus = "checking" | "ok" | "unreachable";
 
-/** The root of the web app. For now it only shows whether the local server is reachable. */
+/** 画面のルート。今は手元のサーバーに届くかだけを表示する。 */
 export function App() {
   const [serverStatus, setServerStatus] = useState<ServerStatus>("checking");
 

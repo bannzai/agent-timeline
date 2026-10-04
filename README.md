@@ -1,21 +1,25 @@
 # agent-timeline
 
-An X-like timeline, on localhost, of what your Claude Code and Codex sessions are doing.
+手元で動いている Claude Code と Codex のセッションを、X のタイムライン風に眺める localhost の Web アプリ。
 
-- **Timeline** — every session's prompts and answers flow into one feed, newest first
-- **Threads** — open a post to read that session's conversation as a chain of replies
-- **Reply to instruct** — reply in a thread and the text is sent to the tmux pane that runs the session
+- **タイムライン**: 全セッションの指示と返答が、新しい順に 1 つのフィードに流れる
+- **スレッド**: 投稿を開くと、そのセッションの会話が返信の連なりとして読める
+- **返信で指示**: スレッドに返信すると、その文がセッションの動いている tmux の pane に送られる
 
-Status: under construction. Nothing is usable yet.
+状態: 開発中。まだ使える機能はありません。
 
-## Data handling
+## データの扱い
 
-agent-timeline reads the session logs that Claude Code (`~/.claude/projects`) and Codex (`~/.codex/sessions`) already write on your machine. It listens on `127.0.0.1` only, stores no copy of the logs and sends nothing to any server. The only file it writes is `~/.agent-timeline/usage.jsonl`, which records when the app was started and when a reply was sent, without any conversation content.
+agent-timeline は、Claude Code (`~/.claude/projects`) と Codex (`~/.codex/sessions`) が手元に書いているセッションのログを読みます。待ち受けは `127.0.0.1` だけで、ログの写しを保存せず、どのサーバーにも送信しません。書き込むファイルは `~/.agent-timeline/usage.jsonl` だけで、アプリを起動した日時と返信を送った日時を記録します (会話の内容は記録しません)。
 
-## Development
+## 開発
 
-See [AGENTS.md](AGENTS.md) for how changes are verified and [documents/PROJECT.md](documents/PROJECT.md) for requirements and constraints.
+変更の検証方法は [AGENTS.md](AGENTS.md)、要件と制約は [documents/PROJECT.md](documents/PROJECT.md) にあります。
 
-## Contact
+## 連絡先
 
 bannzai.app@gmail.com
+
+## ライセンス
+
+[MIT](LICENSE)

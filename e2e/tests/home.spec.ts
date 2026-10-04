@@ -1,6 +1,6 @@
 import { expect, test } from "@playwright/test";
 
-test("the app loads and reaches the server", async ({ page }, testInfo) => {
+test("画面が開き、サーバーに届く", async ({ page }, testInfo) => {
   await page.goto("/");
 
   await expect(page.getByRole("heading", { name: "agent-timeline" })).toBeVisible();

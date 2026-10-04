@@ -3,6 +3,7 @@
   "version": "0.0.0",
   "private": true,
   "description": "X-like timeline for Claude Code / Codex sessions on localhost",
+  "license": "MIT",
   "type": "module",
   "engines": {
     "node": ">=22.12"

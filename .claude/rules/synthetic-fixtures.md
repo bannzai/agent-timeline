@@ -8,11 +8,11 @@ paths:
   - "docs/**"
 ---
 
-# Fixtures and screenshots come from hand-written synthetic sessions
+# fixture とスクリーンショットは手書きの合成セッションから作る
 
-Session logs under `~/.claude/projects` and `~/.codex/sessions` contain private source code, personal information and secrets, and this repository is public. Everything that is committed, attached to a pull request or uploaded as a CI artifact is therefore built from synthetic sessions written by hand (`documents/PROJECT.md`, "Constraints").
+`~/.claude/projects` と `~/.codex/sessions` のセッションのログは、非公開のソースコード・個人情報・secret を含み、このリポジトリは public である。そのため、commit するもの・PR に添付するもの・CI の artifact に上げるものは、すべて手書きの合成セッションから作る (`documents/PROJECT.md`「制約」)。
 
-- Write fixture sessions by hand in the shape the readers expect: invented project names, invented prompts, paths under `/home/dev/...`. Keep only the keys the readers use
-- Take screenshots from the app running against `fixtures/`, on CI. A screenshot of the app showing real sessions is not committed or attached
-- When a real log line is needed to reproduce a parser bug, reduce it to its structure (keys and types) and rewrite every value before it becomes a fixture
-- Tests reach the fixtures through the environment variables that override the log roots, never through the real home directory
+- fixture のセッションは、読み取りのモジュールが期待する形で手書きする。プロジェクト名・指示の文面は架空のものにし、パスは `/home/dev/...` にする。読み取りが使うキーだけを残す
+- スクリーンショットは、CI で `fixtures/` を読ませたアプリから撮る。本物のセッションを表示した画面のスクリーンショットは commit も添付もしない
+- 読み取りの不具合を再現するために本物のログの行が要る時は、構造 (キーと型) だけを残し、すべての値を書き換えてから fixture にする
+- テストは、ログのルートを差し替える環境変数を通して fixture を読む。実際のホームディレクトリは読まない

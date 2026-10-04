@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 
-/** The HTTP API of agent-timeline, without the static files and without a listening socket, so tests can call it directly. */
+/** agent-timeline の HTTP API を返す。静的ファイルの配信と待ち受けを含まないため、テストから直接呼べる。 */
 export function createApp(): Hono {
   const app = new Hono();
 

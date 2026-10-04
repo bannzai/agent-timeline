@@ -1,6 +1,6 @@
 import { defineConfig, devices } from "@playwright/test";
 
-// The server's own default port (server/src/index.ts); nothing else listens on the CI runner.
+// サーバーの既定のポート (server/src/index.ts)。CI の runner ではほかに待ち受けるものが無い。
 const port = 7878;
 
 export default defineConfig({
@@ -12,7 +12,7 @@ export default defineConfig({
     baseURL: `http://127.0.0.1:${port}`,
   },
   projects: [{ name: "chromium", use: { ...devices["Desktop Chrome"] } }],
-  // The production build served by the real server, so E2E covers what `npm start` runs.
+  // 本番のビルドを本物のサーバーで配信し、`npm start` で動くものを E2E で確認する。
   webServer: {
     command: "npm start",
     cwd: "..",

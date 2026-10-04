@@ -11,7 +11,7 @@ export default defineConfig({
   server: {
     host: "127.0.0.1",
     proxy: {
-      // The same variable and default as the server (server/src/index.ts), so `npm run dev` follows a changed port.
+      // サーバー (server/src/index.ts) と同じ環境変数・同じ既定値にし、ポートを変えても `npm run dev` が追随するようにする。
       "/api": `http://127.0.0.1:${process.env.AGENT_TIMELINE_PORT ?? 7878}`,
     },
   },

@@ -1,40 +1,40 @@
 # agent-timeline
 
-An X-like timeline, served on localhost, of what Claude Code and Codex sessions on this machine are doing. Each session's conversation shows up as posts, a post opens into a thread, and replying in a thread sends an instruction to that session.
+このマシンで動いている Claude Code と Codex のセッションの様子を、X のタイムライン風に表示する localhost の Web アプリ。各セッションの会話が投稿として流れ、投稿を開くとスレッドになり、スレッドへの返信がそのセッションへの指示として送られる。
 
-Why it is being built, how success is judged and the MVP feature list live in [DIRECTION.md](DIRECTION.md) (Japanese). This file holds the requirements and constraints that the implementation must keep.
+なぜ作るか・何で成否を判定するか・MVP の機能の一覧は [DIRECTION.md](DIRECTION.md) にある。このファイルは、実装が守る要件と制約を持つ。
 
-## Inputs
+## 入力
 
-agent-timeline only reads files that the agents already write. It does not wrap or launch the agents.
+agent-timeline は、エージェントが既に書いているファイルを読むだけで、エージェントを包んだり起動したりしない。
 
-| Agent | Where the session logs are | Notes |
+| エージェント | セッションのログの場所 | 補足 |
 | --- | --- | --- |
-| Claude Code | `~/.claude/projects/<project slug>/<session id>.jsonl` | One JSON object per line. Lines with `type` `user` / `assistant` carry `message`, `cwd`, `gitBranch`, `timestamp`, `sessionId`; `message.content` is a string or a list of blocks (`text`, `thinking`, `tool_use`, `tool_result`). Other line types (`attachment`, `mode`, `file-history-snapshot`, …) exist. Observed with Claude Code 2.1.289 on 2026-10-04 |
-| Codex CLI | `~/.codex/sessions/<yyyy>/<mm>/<dd>/rollout-<timestamp>-<id>.jsonl` | One JSON object per line with `type` and `payload`. `session_meta` carries `cwd` and `git`; `response_item` carries `payload.type` `message` (`role`, `content`), `reasoning`, `custom_tool_call`, `custom_tool_call_output`; `event_msg` carries `task_started` / `task_complete`. Observed on a 2026-10-02 session file |
+| Claude Code | `~/.claude/projects/<プロジェクトの slug>/<セッション ID>.jsonl` | 1 行に 1 つの JSON。`type` が `user` / `assistant` の行が `message`・`cwd`・`gitBranch`・`timestamp`・`sessionId` を持つ。`message.content` は文字列か、ブロック (`text`・`thinking`・`tool_use`・`tool_result`) の配列。ほかの種類の行 (`attachment`・`mode`・`file-history-snapshot` など) もある。2026-10-04 に Claude Code 2.1.289 のログで確認 |
+| Codex CLI | `~/.codex/sessions/<年>/<月>/<日>/rollout-<日時>-<ID>.jsonl` | 1 行に 1 つの JSON で、`type` と `payload` を持つ。`session_meta` が `cwd` と `git` を持つ。`response_item` は `payload.type` が `message` (`role`・`content`)・`reasoning`・`custom_tool_call`・`custom_tool_call_output`。`event_msg` は `task_started` / `task_complete`。2026-10-02 のセッションのファイルで確認 |
 
-Both formats are internal to the tools and undocumented, so they can change with any release. The readers must skip lines they do not understand instead of failing, and the format knowledge must stay in one module per agent.
+どちらの形式も各ツールの内部のもので文書化されておらず、リリースのたびに変わり得る。読み取りは、理解できない行で失敗せず読み飛ばす。形式の知識はエージェントごとに 1 つのモジュールに閉じる。
 
-The two root directories must be overridable (environment variables), because the machines that run the tests have no real logs.
+テストを実行するマシンには本物のログが無いため、2 つのルートディレクトリは環境変数で差し替えられるようにする。
 
-## Constraints
+## 制約
 
-- **Localhost only.** The server listens on `127.0.0.1`. There is no login, so anything reachable from another machine would expose every conversation.
-- **The reply endpoint types into an agent.** A reply is delivered by sending keys to the tmux pane that runs the session, which makes the endpoint equivalent to running commands on this machine. It must reject requests whose `Origin` / `Host` is not the app's own, so a web page open in the same browser cannot instruct an agent.
-- **No server-side storage.** No database and no copy of the logs. The only file the app writes is the usage log `~/.agent-timeline/usage.jsonl` (launch and reply timestamps, never conversation content), which is the measurement source in DIRECTION.md.
-- **Nothing leaves the machine.** No analytics, no telemetry, no external requests at runtime.
-- **Real session logs never enter the repository.** They contain private code, personal information and secrets. Fixtures and screenshots are made from hand-written synthetic sessions (see `.claude/rules/synthetic-fixtures.md`).
+- **localhost だけ**: サーバーは `127.0.0.1` で待ち受ける。ログインが無いため、別のマシンから届くと全ての会話が見えてしまう
+- **返信の API はエージェントに文字を打ち込む**: 返信は、セッションが動いている tmux の pane へキー入力を送って届ける。つまりこの API は、このマシンでコマンドを実行するのと同じ力を持つ。`Origin` / `Host` がこのアプリ自身でないリクエストは拒否し、同じブラウザで開いている別のサイトからエージェントに指示を送れないようにする
+- **サーバー側に保存しない**: DB を持たず、ログの写しも作らない。アプリが書くファイルは利用記録 `~/.agent-timeline/usage.jsonl` (起動と返信の日時だけ。会話の内容は書かない) だけで、DIRECTION.md の判定基準の計測元になる
+- **マシンの外へ出さない**: 計測・テレメトリ・実行時の外部へのリクエストを持たない
+- **本物のセッションのログをリポジトリに入れない**: 非公開のコード・個人情報・secret を含むため。fixture とスクリーンショットは手書きの合成セッションから作る (`.claude/rules/synthetic-fixtures.md`)
 
-## Infrastructure decisions
+## インフラの決定
 
-| Area | Decision | Reason |
+| 領域 | 決定 | 理由 |
 | --- | --- | --- |
-| Database / storage | None | The agents' log files are the data |
-| Hosting | None; runs from a clone on the user's machine | The data is local and private |
-| Authentication | None; bound to `127.0.0.1` with `Origin` / `Host` checks | Single user on their own machine |
-| Analytics | The local usage log, plus GitHub stars | No external service fits a tool that must not send data out |
-| Alerts (GCP, Crashlytics), billing, store distribution | Not applicable | No cloud project, no mobile app, no payments |
+| DB・ストレージ | 持たない | エージェントのログのファイルがデータそのもの |
+| ホスティング | 持たない。利用者のマシンで clone から動かす | データが手元にあり、非公開のもの |
+| 認証 | 持たない。`127.0.0.1` での待ち受けと `Origin` / `Host` の検査で守る | 自分のマシンで 1 人が使う |
+| 計測 | 手元の利用記録と GitHub の star 数 | 外部へ送信しない制約に合う外部サービスが無い |
+| アラート (GCP・Crashlytics)・課金・ストア配布 | 対象外 | クラウドのプロジェクト・モバイルアプリ・支払いが無い |
 
-## Verification
+## 検証
 
-How to build, test and check the UI is in [AGENTS.md](../AGENTS.md). The short version: nothing is built or opened in a browser on the development machine; GitHub Actions does it, with synthetic fixtures.
+ビルド・テスト・画面の確認の方法は [AGENTS.md](../AGENTS.md) にある。要点: 開発マシンではビルドもブラウザでの表示も行わず、GitHub Actions が合成の fixture で行う。
