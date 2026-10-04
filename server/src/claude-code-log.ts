@@ -14,6 +14,21 @@ import {
 // Claude Code のログの形式の知識は、このファイルの中だけに置く (documents/PROJECT.md「入力」)。
 
 /**
+ * Claude Code が user の行として書く、人間が書いたのではない文の書き出し。2026-09〜10 の Claude Code のログで、
+ * isMeta の付かない user の行の先頭に現れたものを集めた。人間が書いた文 (`<div>` で始まる指示など) と、
+ * 人間が打ったスラッシュコマンド (`<command-name>`)・シェルのコマンド (`<bash-input>`) は残す。
+ */
+const nonHumanTextPrefixes = ["<task-notification", "<local-command-stdout", "<bash-stdout"];
+
+/** 書き手が author の文を投稿にするか。空の文と、人間の行に Claude Code が書いた文は投稿にしない。 */
+function isPostText(text: string, author: PostAuthor): boolean {
+  if (text.trim() === "") {
+    return false;
+  }
+  return author !== "human" || !nonHumanTextPrefixes.some((prefix) => text.startsWith(prefix));
+}
+
+/**
  * `<projectsDirectory>/<プロジェクトの slug>/<セッション ID>.jsonl` のログのファイルを返す。
  * subagent のログは `<セッション ID>/subagents/` の下にあり、セッションの会話ではないため含めない。
  * ディレクトリが無い時 (Claude Code を使っていないマシン) は空の配列を返す。
@@ -66,8 +81,9 @@ export function parseClaudeCodeSessionLog(sessionId: string, logText: string): P
     if (entry.type !== "user" && entry.type !== "assistant") {
       return;
     }
-    // isMeta は Claude Code が差し込んだ文、isSidechain は subagent の会話で、どちらも人間とのやり取りではない。
-    if (entry.isMeta === true || entry.isSidechain === true) {
+    // isMeta は Claude Code が差し込んだ文、isSidechain は subagent の会話、isCompactSummary は会話の圧縮で
+    // Claude Code が書いた要約で、どれも人間とのやり取りではない。
+    if (entry.isMeta === true || entry.isSidechain === true || entry.isCompactSummary === true) {
       return;
     }
     const timestamp = postTimestamp(entry.timestamp);
@@ -79,7 +95,7 @@ export function parseClaudeCodeSessionLog(sessionId: string, logText: string): P
     const content = entry.message.content;
 
     if (typeof content === "string") {
-      if (content.trim() !== "") {
+      if (isPostText(content, textAuthor)) {
         posts.push({
           id: postId("claude-code", sessionId, lineIndex, 0),
           session,
@@ -99,7 +115,11 @@ export function parseClaudeCodeSessionLog(sessionId: string, logText: string): P
         return;
       }
       const id = postId("claude-code", sessionId, lineIndex, blockIndex);
-      if (block.type === "text" && typeof block.text === "string" && block.text.trim() !== "") {
+      if (
+        block.type === "text" &&
+        typeof block.text === "string" &&
+        isPostText(block.text, textAuthor)
+      ) {
         posts.push({ id, session, author: textAuthor, text: block.text, timestamp });
       } else if (block.type === "tool_use" && typeof block.name === "string") {
         posts.push({

@@ -103,6 +103,13 @@ describe("GET /api/posts", () => {
     expect(posts.filter((post) => post.session.sessionId === codexTax)).toHaveLength(3);
   });
 
+  it("Claude Code が user の行に書いた通知・コマンドの出力・会話の要約は投稿にしない", async () => {
+    const { posts } = await responseJson<TimelinePage>(await app.request("/api/posts"));
+
+    // fixture のこのセッションは、3 つの投稿より新しい日時に 3 つの行を持つ。
+    expect(posts.filter((post) => post.session.sessionId === claudeReadme)).toHaveLength(3);
+  });
+
   it("投稿がどのセッションのものかを返す", async () => {
     const body = await responseJson<TimelinePage>(await app.request("/api/posts"));
 
