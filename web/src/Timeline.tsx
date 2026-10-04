@@ -27,7 +27,10 @@ type LoadState = "idle" | "loading" | "error";
 export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession) => void }) {
   const [posts, setPosts] = useState<Post[]>([]);
   // 次に読み込むページのカーソル。undefined は最初のページをまだ読んでいない、null は続きが無いことを表す。
+  // 画面の描き分けは state を、読み込みは ref を使う。ref は読み込みが終わった時点で変わるため、
+  // 描き直す前に古い監視が通知しても、前のページのカーソルで同じページを読み直さない。
   const [nextCursor, setNextCursor] = useState<string | null | undefined>(undefined);
+  const nextCursorRef = useRef<string | null | undefined>(undefined);
   const [loadState, setLoadState] = useState<LoadState>("idle");
   // 同じページを 2 回読まないための印。state と違い、読み込みを始めた直後の同じ描画の中でも値が変わる。
   const loadingRef = useRef(false);
@@ -42,16 +45,13 @@ export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession
 
   /** 次のページを読み、投稿の末尾に足す。読み込み中と、続きが無い時は何もしない。 */
   const loadNextPage = useCallback(() => {
-    if (loadingRef.current || nextCursor === null) {
+    const cursor = nextCursorRef.current;
+    if (loadingRef.current || cursor === null) {
       return;
     }
     loadingRef.current = true;
     setLoadState("loading");
-    fetch(
-      nextCursor === undefined
-        ? "/api/posts"
-        : `/api/posts?${new URLSearchParams({ cursor: nextCursor })}`,
-    )
+    fetch(cursor === undefined ? "/api/posts" : `/api/posts?${new URLSearchParams({ cursor })}`)
       .then(async (response) => {
         if (!response.ok) {
           throw new Error(`一覧の API が ${response.status} を返した`);
@@ -59,6 +59,7 @@ export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession
         return (await response.json()) as TimelinePage;
       })
       .then((page) => {
+        nextCursorRef.current = page.nextCursor;
         setPosts((previousPosts) => [...previousPosts, ...page.posts]);
         setNextCursor(page.nextCursor);
         setLoadState("idle");
@@ -67,9 +68,9 @@ export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession
       .finally(() => {
         loadingRef.current = false;
       });
-  }, [nextCursor]);
+  }, []);
 
-  // 末尾の印が画面に近づいたら続きを読み込む。ページを読むたびに監視を作り直し、
+  // 末尾の印が画面に近づいたら続きを読み込む。読み込みの状態が変わるたびに監視を作り直し、
   // 読んだページが短くて印がまだ見えている時も、作り直した監視の最初の通知で次のページを読む。
   useEffect(() => {
     const sentinel = sentinelRef.current;

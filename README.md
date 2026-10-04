@@ -6,11 +6,28 @@
 - **スレッド**: 投稿を開くと、そのセッションの会話が返信の連なりとして読める
 - **返信で指示**: スレッドに返信すると、その文がセッションの動いている tmux の pane に送られる
 
-状態: 開発中。まだ使える機能はありません。
+## 使い方
+
+Node.js 22.12 以上が必要です。
+
+```sh
+git clone https://github.com/bannzai/agent-timeline.git
+cd agent-timeline
+npm ci
+npm start
+```
+
+`npm start` は画面とサーバーをビルドしてから起動します。起動したらブラウザで http://127.0.0.1:7878 を開きます。
+
+ポートを変える時は、環境変数 `AGENT_TIMELINE_PORT` を指定します。
+
+```sh
+AGENT_TIMELINE_PORT=8000 npm start
+```
 
 ## データの扱い
 
-agent-timeline は、Claude Code (`~/.claude/projects`) と Codex (`~/.codex/sessions`) が手元に書いているセッションのログを読みます。待ち受けは `127.0.0.1` だけで、ログの写しを保存せず、どのサーバーにも送信しません。書き込むファイルは `~/.agent-timeline/usage.jsonl` だけで、アプリを起動した日時と返信を送った日時を記録します (会話の内容は記録しません)。
+agent-timeline は、Claude Code (`~/.claude/projects`) と Codex (`~/.codex/sessions`) が手元に書いているセッションのログを読みます。待ち受けは `127.0.0.1` だけで、ログの写しを保存せず、どのサーバーにも送信しません。書き込むファイルは `~/.agent-timeline/usage.jsonl` だけで、アプリを起動した日時と返信を送った日時を記録します (会話の内容は記録しません)。記録先のディレクトリは環境変数 `AGENT_TIMELINE_USAGE_DIR` で変えられます。記録先に書けない時も、記録せずに起動します。
 
 ## 開発
 

@@ -10,8 +10,8 @@ agent-timeline は、エージェントが既に書いているファイルを�
 
 | エージェント | セッションのログの場所 | 補足 |
 | --- | --- | --- |
-| Claude Code | `~/.claude/projects/<プロジェクトの slug>/<セッション ID>.jsonl` | 1 行に 1 つの JSON。`type` が `user` / `assistant` の行が `message`・`cwd`・`gitBranch`・`timestamp`・`sessionId` を持つ。`message.content` は文字列か、ブロック (`text`・`thinking`・`tool_use`・`tool_result`) の配列。ほかの種類の行 (`attachment`・`mode`・`file-history-snapshot` など) もある。2026-10-04 に Claude Code 2.1.289 のログで確認 |
-| Codex CLI | `~/.codex/sessions/<年>/<月>/<日>/rollout-<日時>-<ID>.jsonl` | 1 行に 1 つの JSON で、`type` と `payload` を持つ。`session_meta` が `cwd` と `git` を持つ。`response_item` は `payload.type` が `message` (`role`・`content`)・`reasoning`・`custom_tool_call`・`custom_tool_call_output`。`event_msg` は `task_started` / `task_complete`。2026-10-02 のセッションのファイルで確認 |
+| Claude Code | `~/.claude/projects/<プロジェクトの slug>/<セッション ID>.jsonl` | 1 行に 1 つの JSON。`type` が `user` / `assistant` の行が `message`・`cwd`・`gitBranch`・`timestamp`・`sessionId` を持つ。`message.content` は文字列か、ブロック (`text`・`thinking`・`tool_use`・`tool_result`) の配列。`tool_result` は、呼び出しの `tool_use` の `id` を `tool_use_id` に持つ。ほかの種類の行 (`attachment`・`mode`・`file-history-snapshot` など) もある。2026-10-04 に Claude Code 2.1.289 のログで確認 |
+| Codex CLI | `~/.codex/sessions/<年>/<月>/<日>/rollout-<日時>-<ID>.jsonl` | 1 行に 1 つの JSON で、`type` と `payload` を持つ。`session_meta` が `cwd` と `git` を持つ。`response_item` は `payload.type` が `message` (`role`・`content`)・`reasoning`・`custom_tool_call` / `function_call` (ツール呼び出し)・`custom_tool_call_output` / `function_call_output` (ツールの結果。呼び出しと同じ `call_id` を持つ)。`event_msg` は `task_started` / `task_complete`。2026-10-02 のセッションのファイルで確認 |
 
 どちらの形式も各ツールの内部のもので文書化されておらず、リリースのたびに変わり得る。読み取りは、理解できない行で失敗せず読み飛ばす。形式の知識はエージェントごとに 1 つのモジュールに閉じる。
 
@@ -21,7 +21,7 @@ agent-timeline は、エージェントが既に書いているファイルを�
 
 - **localhost だけ**: サーバーは `127.0.0.1` で待ち受ける。ログインが無いため、別のマシンから届くと全ての会話が見えてしまう。同じ理由で、API は `Host` がこのマシン (`127.0.0.1` / `localhost`) でないリクエストを拒否する。ブラウザで開いた別のサイトが自分のドメインを `127.0.0.1` に向け直して (DNS rebinding) 会話を読むのを防ぐ
 - **返信の API はエージェントに文字を打ち込む**: 返信は、セッションが動いている tmux の pane へキー入力を送って届ける。つまりこの API は、このマシンでコマンドを実行するのと同じ力を持つ。`Origin` / `Host` がこのアプリ自身でないリクエストは拒否し、同じブラウザで開いている別のサイトからエージェントに指示を送れないようにする
-- **サーバー側に保存しない**: DB を持たず、ログの写しも作らない。アプリが書くファイルは利用記録 `~/.agent-timeline/usage.jsonl` (起動と返信の日時だけ。会話の内容は書かない) だけで、DIRECTION.md の判定基準の計測元になる
+- **サーバー側に保存しない**: DB を持たず、ログの写しも作らない。アプリが書くファイルは利用記録 `~/.agent-timeline/usage.jsonl` (起動と返信の日時だけ。会話の内容は書かない) だけで、DIRECTION.md の判定基準の計測元になる。テストが実際のホームディレクトリに書かないため、記録先のディレクトリは環境変数 `AGENT_TIMELINE_USAGE_DIR` で差し替えられるようにする。書けない時も起動は続ける
 - **マシンの外へ出さない**: 計測・テレメトリ・実行時の外部へのリクエストを持たない
 - **本物のセッションのログをリポジトリに入れない**: 非公開のコード・個人情報・secret を含むため。fixture とスクリーンショットは手書きの合成セッションから作る (`.claude/rules/synthetic-fixtures.md`)
 

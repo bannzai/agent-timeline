@@ -19,7 +19,7 @@ Claude Code / Codex のセッションを X のタイムライン風に表示す
 - 画面の確認: E2E の job が Playwright の出力 (スクリーンショットを含む) を `e2e-screenshots` artifact として上げる。`gh run download <run ID> -n e2e-screenshots -D ./tmp/e2e-screenshots-<run ID>` で取得し、PNG を Read して画面を判断する
 - 画面の振る舞いを足す時は、`e2e/tests/` の E2E テストでその画面を操作し、`testInfo.outputPath(...)` にスクリーンショットを保存する。そのスクリーンショットが変更の証拠になる
 - CI には本物のセッションのログが無い。テストと E2E は、ログのルートを差し替える環境変数を通して `fixtures/` の合成セッションを読む (`.claude/rules/synthetic-fixtures.md`)
-- テストではなく手で画面を操作して確かめたい時は、GitHub Actions の runner 上の Chromium を操作する `webtunnel` skill を使う。`.github/workflows/browser-session.yml` と Secrets の `TS_OIDC_CLIENT_ID` / `TS_OIDC_AUDIENCE` が要るため、両方がそろうまでは E2E のスクリーンショットで確認する
+- テストではなく手で画面を操作して確かめたい時は、GitHub Actions の runner 上の Chromium を操作する `webtunnel` skill を使う。`WEBTUNNEL_REPO=bannzai/agent-timeline` でセッションを起動すると、runner が `npm run start:fixtures` で `fixtures/` の合成セッションを表示したアプリを起動する (`.github/workflows/browser-session.yml`)。public リポジトリでは録画とスクリーンショットの artifact が公開されるため、本物のセッションを表示しない
 - 本物のセッションへの返信には tmux と動いているエージェントが要り、CI には無い。CI では `PATH` に置いた偽の `tmux` で確認し、本物のセッションでの確認は「ユーザー作業の一覧」issue に載せた人間の確認で行う
 
 <!-- ai-review-config begin -->
