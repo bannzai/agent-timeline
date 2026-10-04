@@ -5,6 +5,7 @@ import {
   parseJson,
   type Post,
   type PostAuthor,
+  postId,
   postTimestamp,
   type SessionLogFile,
   toolCallText,
@@ -80,7 +81,7 @@ export function parseClaudeCodeSessionLog(sessionId: string, logText: string): P
     if (typeof content === "string") {
       if (content.trim() !== "") {
         posts.push({
-          id: `claude-code:${sessionId}:${lineIndex}:0`,
+          id: postId("claude-code", sessionId, lineIndex, 0),
           session,
           author: textAuthor,
           text: content,
@@ -97,7 +98,7 @@ export function parseClaudeCodeSessionLog(sessionId: string, logText: string): P
       if (!isRecord(block)) {
         return;
       }
-      const id = `claude-code:${sessionId}:${lineIndex}:${blockIndex}`;
+      const id = postId("claude-code", sessionId, lineIndex, blockIndex);
       if (block.type === "text" && typeof block.text === "string" && block.text.trim() !== "") {
         posts.push({ id, session, author: textAuthor, text: block.text, timestamp });
       } else if (block.type === "tool_use" && typeof block.name === "string") {

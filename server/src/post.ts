@@ -16,7 +16,7 @@ export interface PostSession {
 
 /** タイムラインとスレッドに並ぶ 1 つの発言。Claude Code と Codex の発言を同じ形で表す。 */
 export interface Post {
-  /** ログの中の位置から作る、投稿を一意に指す ID。ログは追記だけされるため、同じ発言は同じ ID のままになる。 */
+  /** ログの中の位置から作る (postId)、投稿を一意に指す ID。ログは追記だけされるため、同じ発言は同じ ID のままになる。 */
   id: string;
   session: PostSession;
   author: PostAuthor;
@@ -35,6 +35,25 @@ export interface SessionLogFile {
 // ツール呼び出しは画面で 1 行に畳むため、引数の全文は要らない。ファイルの書き込みの本文などで応答が膨らむのを防ぐ。
 // 300 文字は、1 行に畳んだ時に見える幅より長く、読むファイルのパスや実行するコマンドがふつう収まる長さとして選んだ。
 const toolCallTextMaxLength = 300;
+
+/**
+ * ログの中の位置から投稿の ID を作る。行とブロックの番号は桁をそろえて書き、
+ * 同じセッションの ID の文字列の大小がログの中の前後と一致するようにする (同じ日時の投稿の順序に使う)。
+ */
+export function postId(
+  agent: AgentKind,
+  sessionId: string,
+  lineIndex: number,
+  blockIndex: number,
+): string {
+  // 1 つのログが 10 億行に、1 行のブロックが 1000 個に届くことは無いため、この桁数で大小が崩れない。
+  return [
+    agent,
+    sessionId,
+    String(lineIndex).padStart(9, "0"),
+    String(blockIndex).padStart(3, "0"),
+  ].join(":");
+}
 
 /** JSON の文字列を読む。読めなければ undefined を返す。 */
 export function parseJson(jsonText: string): unknown {

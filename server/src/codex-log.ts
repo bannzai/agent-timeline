@@ -5,6 +5,7 @@ import {
   parseJson,
   type Post,
   type PostAuthor,
+  postId,
   postTimestamp,
   type SessionLogFile,
   toolCallText,
@@ -44,12 +45,22 @@ export async function listCodexSessionLogFiles(
 }
 
 /**
- * Codex が人間の指示の message に差し込む文脈 (`<environment_context>`・AGENTS.md の指示など) か。
- * 2026-10 の Codex のログでは、差し込まれた文脈はどれも XML 風のタグか AGENTS.md の見出しで始まっていた。
+ * Codex が人間の指示の message に差し込む文脈の書き出し。2026-08〜10 の Codex のログで、user の message の
+ * 要素の先頭に現れたものを集めた。人間が書いた文 (`<div>` で始まる指示など) を落とさないよう、既知のものに限る。
  */
+const injectedContextPrefixes = [
+  "<environment_context>",
+  "# AGENTS.md instructions",
+  "<skill>",
+  "<recommended_plugins>",
+  "<hook_prompt ",
+  "<codex_internal_context ",
+  "<no retained transcript delta entries>",
+];
+
+/** Codex が人間の指示の message に差し込んだ文脈か。 */
 function isInjectedContext(text: string): boolean {
-  const trimmedText = text.trimStart();
-  return trimmedText.startsWith("<") || trimmedText.startsWith("# AGENTS.md instructions");
+  return injectedContextPrefixes.some((prefix) => text.trimStart().startsWith(prefix));
 }
 
 /** message の content の要素の文。文を持たない要素は null を返す。 */
@@ -90,7 +101,7 @@ export function parseCodexSessionLog(sessionId: string, logText: string): Post[]
     if (timestamp === null) {
       return;
     }
-    const id = `codex:${sessionId}:${lineIndex}`;
+    const id = postId("codex", sessionId, lineIndex, 0);
     const session = { agent: "codex" as const, sessionId, projectDirectory, gitBranch };
 
     if (payload.type === "message") {

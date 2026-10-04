@@ -25,7 +25,8 @@ const allPostsNewestFirst = [
   ["claude-code", claudeCart, "human", "カートに商品を追加しても合計金額が更新されないので直して"],
   ["codex", codexUnit, "agent", "--unit オプションを追加しました"],
   ["codex", codexUnit, "tool", "apply_patch *** Begin Patch\n*** End Patch"],
-  ["codex", codexUnit, "human", "気温の単位を摂氏と華氏で切り替えるオプションを足して"],
+  // < で始まる人間の指示は、Codex が差し込む文脈と違って残る。
+  ["codex", codexUnit, "human", "<Forecast> の気温を摂氏と華氏で切り替えるオプションを足して"],
 ];
 
 /** 投稿を、並びの比較に使う [agent, セッション ID, 書き手, 本文] にする。 */

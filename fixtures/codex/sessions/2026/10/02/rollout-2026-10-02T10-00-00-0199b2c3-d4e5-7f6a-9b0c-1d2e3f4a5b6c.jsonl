@@ -1,5 +1,5 @@
 {"timestamp":"2026-10-02T09:59:59.000Z","type":"session_meta","payload":{"id":"0199b2c3-d4e5-7f6a-9b0c-1d2e3f4a5b6c","cwd":"/home/dev/acme-shop","git":{"branch":"fix/tax-rounding"}}}
-{"timestamp":"2026-10-02T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /home/dev/acme-shop\n\n架空のリポジトリの指示"},{"type":"input_text","text":"消費税の端数を切り捨てにして"}]}}
+{"timestamp":"2026-10-02T10:00:00.000Z","type":"response_item","payload":{"type":"message","role":"user","content":[{"type":"input_text","text":"# AGENTS.md instructions for /home/dev/acme-shop\n\n架空のリポジトリの指示"},{"type":"input_text","text":"<skill>\n<name>fixture-skill</name>\n</skill>"},{"type":"input_text","text":"消費税の端数を切り捨てにして"}]}}
 {"timestamp":"2026-10-02T10:00:02.000Z","type":"response_item","payload":
 {"timestamp":"2026-10-02T10:00:03.000Z","type":"world_state","payload":{}}
 {"timestamp":"2026-10-02T10:00:08.000Z","type":"response_item","payload":{"type":"function_call","call_id":"call_fixture_2","name":"shell","arguments":"{\"command\":[\"rg\",\"tax\"]}"}}
