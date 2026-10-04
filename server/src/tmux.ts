@@ -15,6 +15,60 @@ const commandMaxBufferBytes = 16 * 1024 * 1024;
 // 文字の入力の直後に Enter を送ると、エージェントの入力欄が文字を取り込む前に Enter が届き、送信されないことがあるため、間を置く。
 // 300 ミリ秒は、取り込みを待っても指示を送った手応えが遅れない長さとして選んだ。
 const enterDelayMs = 300;
+// 対話の画面 (TUI) を開かないサブコマンド。対話の画面を開く `codex resume`・`codex fork` と、`claude` の引数の指示 (prompt) は含めない。
+// 2026-10-05 に Claude Code 2.1.289 と codex-cli 0.156.0 の `--help` の Commands で確認した。
+const claudeNonInteractiveCommands = new Set([
+  "agents",
+  "attach",
+  "auth",
+  "auto-mode",
+  "doctor",
+  "gateway",
+  "import",
+  "install",
+  "logs",
+  "mcp",
+  "plugin",
+  "plugins",
+  "purge",
+  "respawn",
+  "rm",
+  "setup-token",
+  "stop",
+  "kill",
+  "ultrareview",
+  "update",
+  "upgrade",
+]);
+const codexNonInteractiveCommands = new Set([
+  "agents",
+  "exec",
+  "e",
+  "review",
+  "login",
+  "logout",
+  "mcp",
+  "plugin",
+  "app-server",
+  "remote-control",
+  "app",
+  "completion",
+  "update",
+  "doctor",
+  "sandbox",
+  "debug",
+  "apply",
+  "a",
+  "queue",
+  "archive",
+  "delete",
+  "migrate-rollouts",
+  "unarchive",
+  "cloud",
+  "exec-server",
+  "features",
+  "help",
+]);
 
 /** 返信の送信に使う外部のコマンドの実行ファイル。テストと CI は偽のコマンドに差し替える。 */
 export interface ReplyCommands {
@@ -44,11 +98,15 @@ interface RunningProcess {
   args: string;
 }
 
-/** 返信の送信の結果。unavailable は送り先が無くて何も送らなかったこと、failed は送る途中で失敗したことを表す。 */
+/**
+ * 返信の送信の結果。unavailable は送り先が無くて何も送らなかったこと、failed は送る途中で失敗したことを表す。
+ * textTyped は、本文を pane に入力した後 (Enter の前後) に失敗し、本文が pane の入力欄に残りうること。
+ * 同じ本文を送り直すと入力欄で 2 つがつながるため、画面は返信欄の本文を消す。
+ */
 export type ReplySendResult =
   | { status: "sent" }
   | { status: "unavailable"; reason: string }
-  | { status: "failed"; reason: string };
+  | { status: "failed"; reason: string; textTyped: boolean };
 
 /**
  * 環境変数から返信に使うコマンドを決める。テストと CI は、ここで偽のコマンドに差し替える。
@@ -114,13 +172,27 @@ async function listRunningProcesses(ps: string): Promise<RunningProcess[] | null
 }
 
 /**
- * プロセスの引数から、そのプロセスがどの agent かを返す。agent でなければ null を返す。
+ * プロセスの引数から、そのプロセスが指示を受け取る対話の agent かを返し、どの agent かを返す。そうでなければ null を返す。
  * Claude Code は `claude`、Codex は `codex` の実行ファイルで動く。npm で入れたものは `node <パス>/claude` の形で動く。
+ * 対話でない起動 (`claude -p`・`codex exec` などのサブコマンド) は端末の入力を読まず、送った本文が終わった後のシェルに残って
+ * コマンドとして実行されうるため、agent とみなさない。
  */
 function processAgent(args: string): AgentKind | null {
-  const [program = "", script = ""] = args.split(/\s+/);
-  const name = path.basename(program) === "node" ? path.basename(script) : path.basename(program);
-  return name === "claude" ? "claude-code" : name === "codex" ? "codex" : null;
+  const tokens = args.split(/\s+/);
+  const [program = "", script = ""] = tokens;
+  const isNodeScript = path.basename(program) === "node";
+  const name = path.basename(isNodeScript ? script : program);
+  const agentArgs = tokens.slice(isNodeScript ? 2 : 1);
+  if (name === "claude") {
+    return agentArgs.some((arg) => arg === "-p" || arg === "--print") ||
+      claudeNonInteractiveCommands.has(agentArgs[0] ?? "")
+      ? null
+      : "claude-code";
+  }
+  if (name === "codex") {
+    return codexNonInteractiveCommands.has(agentArgs[0] ?? "") ? null : "codex";
+  }
+  return null;
 }
 
 /**
@@ -207,7 +279,7 @@ export async function sendReply(
       tmuxLiteralArgument(text),
     ])) === null
   ) {
-    return { status: "failed", reason: "tmux に送れませんでした" };
+    return { status: "failed", reason: "tmux に送れませんでした", textTyped: false };
   }
   await delay(enterDelayMs);
   // 入力している間に agent が止められてシェルが手前に戻っていれば、Enter で本文がコマンドとして実行されるため、Enter の直前にも確かめる。
@@ -215,11 +287,17 @@ export async function sendReply(
   if (!replyTargetBeforeEnter.available || replyTargetBeforeEnter.paneId !== paneId) {
     return {
       status: "failed",
-      reason: "送る途中で pane のエージェントが変わったため Enter を送りませんでした",
+      reason:
+        "送る途中で pane のエージェントが変わったため Enter を送っていません (本文は pane の入力欄に残っています)",
+      textTyped: true,
     };
   }
   if ((await runCommand(commands.tmux, ["send-keys", "-t", paneId, "Enter"])) === null) {
-    return { status: "failed", reason: "tmux に送れませんでした" };
+    return {
+      status: "failed",
+      reason: "Enter を tmux に送れませんでした (本文は pane の入力欄に残っています)",
+      textTyped: true,
+    };
   }
   return { status: "sent" };
 }

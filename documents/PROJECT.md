@@ -23,11 +23,12 @@ agent-timeline は、エージェントが既に書いているファイルを�
 
 - pane の作業ディレクトリ (`tmux list-panes -a` の `pane_current_path`) が、セッションの最後の発言の作業ディレクトリと同じ
 - pane のシェル (`pane_pid`) か、その直下のプロセスが、同じ種類の agent である。agent の種類は `ps` の引数の実行ファイルの名前 (`claude` / `codex`。`node` で動くものはスクリプトの名前) で見分ける。tmux の `pane_current_command` は、Claude Code のネイティブ版ではバージョン番号 (`2.1.282` など)、npm で入れた Codex では `node` になり、agent を見分けられない (2026-10-05 に tmux 3.6a・Claude Code 2.1.282 のマシンで確認)。直下より深いプロセスを見ないのは、agent がツールとして起動した別の agent (Claude Code から実行した `codex exec` など) を取り違えないため
+- その agent が対話で動いている。`claude -p` / `--print` と、対話の画面を開かないサブコマンド (`claude mcp`・`codex exec`・`codex review` など) は端末の入力を読まず、送った本文が終わった後のシェルに残ってコマンドとして実行されうるため、agent とみなさない
 - その agent のプロセスが、端末の手前のプロセスグループにいて (`ps` の stat に `+`)、止まっていない (stat が `T` で始まらない)。止めた (Ctrl+Z) agent や裏で動かした agent の pane では、キー入力を受け取るのはシェルで、本文がコマンドとして実行されてしまうため
 
 同じディレクトリで動いている同じ種類の agent が 2 つ以上ある時は、送り先を決めずに返信できないとする。過去のセッションも、今そのディレクトリで動いている agent の pane に対応付く (ログと pane の agent のプロセスを結びつける情報が無いため)。
 
-送信は、送る直前に対応付けをやり直してから、`tmux send-keys -t <pane の ID> -l -- <本文>` と `tmux send-keys -t <pane の ID> Enter` を、シェルを通さず引数の配列で実行する。Enter の直前にも対応付けをやり直し、送り先が変わっていれば Enter を送らない。tmux は引数の末尾の `;` をコマンドの区切りとして取り除くため、末尾が `;` の本文は最後の `;` の前に `\` を足して渡す (2026-10-05 に tmux 3.6a で確認)。同時に届いた返信は 1 つずつ送り、2 つの本文が Enter の前につながらないようにする。CI には tmux も動いている agent も無いため、tmux と ps の実行ファイルは環境変数 (`AGENT_TIMELINE_TMUX`・`AGENT_TIMELINE_PS`) で偽のコマンド (`fixtures/fake-commands/`) に差し替えられるようにする。
+送信は、送る直前に対応付けをやり直してから、`tmux send-keys -t <pane の ID> -l -- <本文>` と `tmux send-keys -t <pane の ID> Enter` を、シェルを通さず引数の配列で実行する。Enter の直前にも対応付けをやり直し、送り先が変わっていれば Enter を送らない (本文は pane の入力欄に残るため、画面は返信欄の本文を消して、同じ本文を送り直して入力欄でつながらないようにする)。tmux は引数の末尾の `;` をコマンドの区切りとして取り除くため、末尾が `;` の本文は最後の `;` の前に `\` を足して渡す (2026-10-05 に tmux 3.6a で確認)。同時に届いた返信は 1 つずつ送り、2 つの本文が Enter の前につながらないようにする。CI には tmux も動いている agent も無いため、tmux と ps の実行ファイルは環境変数 (`AGENT_TIMELINE_TMUX`・`AGENT_TIMELINE_PS`) で偽のコマンド (`fixtures/fake-commands/`) に差し替えられるようにする。
 
 ## 制約
 

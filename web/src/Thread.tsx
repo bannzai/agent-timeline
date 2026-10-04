@@ -182,7 +182,14 @@ function ReplyComposer({ agent, sessionId }: { agent: AgentKind; sessionId: stri
           setSendState({ status: "sent" });
           return;
         }
-        const body = (await response.json().catch(() => null)) as { error?: string } | null;
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+          textTyped?: boolean;
+        } | null;
+        // 本文が pane の入力欄に残っている時に同じ本文を送り直すと、入力欄で 2 つがつながるため、返信欄からは消す。
+        if (body?.textTyped === true) {
+          setText("");
+        }
         setSendState({
           status: "failed",
           reason: body?.error ?? `サーバーが ${response.status} を返しました`,

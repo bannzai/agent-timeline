@@ -136,7 +136,7 @@ export function createApp(options: AppOptions): Hono {
       return c.json({ error: replySendResult.reason }, 409);
     }
     if (replySendResult.status === "failed") {
-      return c.json({ error: replySendResult.reason }, 502);
+      return c.json({ error: replySendResult.reason, textTyped: replySendResult.textTyped }, 502);
     }
     // 利用記録は判定のための計測で、本文は書かない。書けなくても返信は届いているため、警告だけ出して成功を返す。
     await appendUsageEvent(options.usageLogDirectory, "reply", new Date()).catch(

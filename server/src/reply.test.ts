@@ -90,7 +90,7 @@ async function readUsageLogLines(usageLogDirectory: string): Promise<Record<stri
 }
 
 /** 返信の API へ、このアプリの画面と同じ Origin と Content-Type で本文を送る。 */
-function postReply(app: Hono, sessionPath: string, text: unknown): Promise<Response> {
+async function postReply(app: Hono, sessionPath: string, text: unknown): Promise<Response> {
   return app.request(`${appOrigin}/api/sessions/${sessionPath}/replies`, {
     method: "POST",
     headers: { Origin: appOrigin, "Content-Type": "application/json" },
@@ -178,6 +178,47 @@ describe("スレッドの API の返信できるか", () => {
       });
     },
   );
+
+  it.each([
+    ["claude -p", "claude-code", claudeCart, "claude -p 合計を直して"],
+    ["claude --print", "claude-code", claudeCart, "claude --model opus --print 合計を直して"],
+    ["claude mcp", "claude-code", claudeCart, "claude mcp list"],
+    ["codex exec", "codex", codexTax, "codex exec 端数を直して"],
+    ["npm の codex exec", "codex", codexTax, "node /usr/local/bin/codex exec 端数を直して"],
+    ["codex review", "codex", codexTax, "codex review"],
+  ])(
+    "対話でない起動 (%s) の agent の pane は、端末の入力を読まないため送り先にしない",
+    async (_, agent, sessionId, agentArgs) => {
+      const context = await prepareReplyTest();
+      await replaceFakeTables(context, {
+        panes: ["%1\t1001\t/home/dev/acme-shop"],
+        processes: [" 1001     1 Ss   -zsh", ` 1101  1001 S+   ${agentArgs}`],
+      });
+
+      expect((await requestReplyTarget(context.app, `${agent}/${sessionId}`)).available).toBe(
+        false,
+      );
+    },
+  );
+
+  it.each([
+    ["claude", "claude-code", claudeCart, "claude"],
+    ["claude --resume", "claude-code", claudeCart, "claude --resume 3f2a9c1e"],
+    ["claude に指示を渡した起動", "claude-code", claudeCart, "claude 合計を直して"],
+    ["codex resume", "codex", codexTax, "codex resume --last"],
+    ["codex に指示を渡した起動", "codex", codexTax, "codex 端数を直して"],
+  ])("対話の起動 (%s) の agent の pane は送り先にする", async (_, agent, sessionId, agentArgs) => {
+    const context = await prepareReplyTest();
+    await replaceFakeTables(context, {
+      panes: ["%1\t1001\t/home/dev/acme-shop"],
+      processes: [" 1001     1 Ss   -zsh", ` 1101  1001 S+   ${agentArgs}`],
+    });
+
+    expect(await requestReplyTarget(context.app, `${agent}/${sessionId}`)).toEqual({
+      available: true,
+      paneId: "%1",
+    });
+  });
 
   it("tmux のサーバーが動いていない時は、返信できない理由を返す", async () => {
     const { app } = await prepareReplyTest();
@@ -329,7 +370,7 @@ describe("POST /api/sessions/:agent/:sessionId/replies", () => {
     expect(await readSendKeysCalls(context.tmuxCallsFile)).toEqual([]);
   });
 
-  it("本文を入力している間に agent が止められたら、Enter を送らず 502 を返す", async () => {
+  it("本文を入力している間に agent が止められたら、Enter を送らず、本文が入力欄に残ったことを 502 で返す", async () => {
     const context = await prepareReplyTest();
 
     const responsePromise = postReply(context.app, `claude-code/${claudeCart}`, replyText);
@@ -343,7 +384,9 @@ describe("POST /api/sessions/:agent/:sessionId/replies", () => {
 
     expect(response.status).toBe(502);
     expect(await response.json()).toEqual({
-      error: "送る途中で pane のエージェントが変わったため Enter を送りませんでした",
+      error:
+        "送る途中で pane のエージェントが変わったため Enter を送っていません (本文は pane の入力欄に残っています)",
+      textTyped: true,
     });
     expect(await readSendKeysCalls(context.tmuxCallsFile)).toEqual([
       ["send-keys", "-t", "%1", "-l", "--", replyText],
