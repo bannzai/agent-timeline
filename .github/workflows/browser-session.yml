@@ -1,0 +1,52 @@
+name: browser-session
+# run-name は bannzai/webtunnel の CLI が run を特定するキーのため、この形式を変えない
+run-name: "session=${{ inputs.session }} duration=${{ inputs.duration_minutes }}m"
+
+on:
+  workflow_dispatch: # fork の PR に Secrets を渡さないため workflow_dispatch だけにする
+    # webtunnel の CLI が送る input。宣言していない input を送られると dispatch が拒否される
+    inputs:
+      session:
+        required: true
+        default: dev
+      duration_minutes:
+        required: true
+        default: "60"
+      start_url:
+        required: false
+        default: ""
+      record:
+        required: false
+        default: "true"
+      preview:
+        required: false
+        default: "true"
+      setup_script:
+        required: false
+        default: ".webtunnel/setup.sh"
+      software_webgl:
+        required: false
+        default: "false"
+
+jobs:
+  session:
+    permissions:
+      id-token: write
+      contents: read
+    uses: bannzai/webtunnel/.github/workflows/session.yml@66a7d244332f605253c86c6ee0851f11980f5f01 # main
+    with:
+      session: ${{ inputs.session }}
+      duration_minutes: ${{ inputs.duration_minutes }}
+      start_url: ${{ inputs.start_url }}
+      record: ${{ inputs.record }}
+      preview: ${{ inputs.preview }}
+      setup_script: ${{ inputs.setup_script }}
+      software_webgl: ${{ inputs.software_webgl }}
+      setup_command: npm ci
+      # runner には本物のセッションのログが無いため、fixtures/ の合成セッションを表示する
+      start_command: npm run start:fixtures
+      port: "7878"
+      node_version: "22"
+    secrets:
+      TS_OIDC_CLIENT_ID: ${{ secrets.TS_OIDC_CLIENT_ID }}
+      TS_OIDC_AUDIENCE: ${{ secrets.TS_OIDC_AUDIENCE }}
