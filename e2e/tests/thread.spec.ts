@@ -35,26 +35,38 @@ async function openClaudeCartThreadFromTimeline(page: Page): Promise<void> {
   await expect(page).toHaveURL(claudeCartThreadPath);
 }
 
-test("タイムラインの投稿からスレッドへ移り、そのセッションの発言だけを古い順に表示する", async ({
+test("タイムラインの投稿からスレッドへ移り、そのセッションの最新と最初の発言を出して間を畳む", async ({
   page,
 }, testInfo) => {
   const response = await page.request.get(`/api${claudeCartThreadPath}/posts`);
   expect(response.status()).toBe(200);
   const { posts } = (await response.json()) as { posts: Post[] };
+  expect(posts).toHaveLength(4);
 
   await openClaudeCartThreadFromTimeline(page);
 
   const threadPosts = page.getByTestId("thread-post");
-  await expect(threadPosts).toHaveCount(posts.length);
-  expect(await attributeValues(threadPosts, "data-post-id")).toEqual(posts.map((post) => post.id));
+  await expect(threadPosts).toHaveCount(2);
+  expect(await attributeValues(threadPosts, "data-post-id")).toEqual([posts[3]?.id, posts[0]?.id]);
+  const foldButton = page.getByRole("button", { name: "他 2 件" });
+  await expect(foldButton).toBeVisible();
   expect(new Set(await attributeValues(threadPosts, "data-session-id"))).toEqual(
     new Set([claudeCart]),
   );
-  const timestamps = await attributeValues(threadPosts.locator("time"), "datetime");
-  expect(timestamps).toEqual([...timestamps].sort());
   // スレッドを開いている間、タイムラインの投稿は見えない。
   await expect(page.getByTestId("post").first()).toBeHidden();
   await page.screenshot({ path: testInfo.outputPath("thread.png"), fullPage: true });
+
+  // 「他 2 件」を押すと間の発言が開き、全部の発言が新しい順に並ぶ。
+  await foldButton.click();
+  await expect(threadPosts).toHaveCount(posts.length);
+  expect(await attributeValues(threadPosts, "data-post-id")).toEqual(
+    posts.map((post) => post.id).reverse(),
+  );
+  const timestamps = await attributeValues(threadPosts.locator("time"), "datetime");
+  expect(timestamps).toEqual([...timestamps].sort().reverse());
+  await expect(page.getByTestId("thread-fold")).toHaveCount(0);
+  await page.screenshot({ path: testInfo.outputPath("thread-expanded.png"), fullPage: true });
 
   await page.getByRole("button", { name: "戻る" }).click();
   await expect(page).toHaveURL("/");
@@ -82,20 +94,26 @@ test("ブラウザの進むでスレッドへ移った後に戻っても、タ�
   await page.goBack();
   await expect(page).toHaveURL("/");
   // スレッドを開いた時と違う位置まで読み進めてから、ブラウザの進むでスレッドへ移る。
-  // 200px は、fixture の 14 件のタイムラインがこの画面の高さで届く位置。
-  await page.evaluate(() => window.scrollTo(0, 200));
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(200);
+  // 位置は、タイムラインの表示が変わって高さが変わっても届くよう、スクロールできる範囲の中ほどにする。
+  const readingScrollY = await page.evaluate(() =>
+    Math.floor((document.documentElement.scrollHeight - window.innerHeight) / 2),
+  );
+  expect(readingScrollY).toBeGreaterThan(0);
+  await page.evaluate((scrollY) => window.scrollTo(0, scrollY), readingScrollY);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(readingScrollY);
   await page.goForward();
   await expect(page).toHaveURL(claudeCartThreadPath);
   await expect(page.getByTestId("thread-post").first()).toBeVisible();
 
   await page.goBack();
   await expect(page).toHaveURL("/");
-  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(200);
+  await expect.poll(() => page.evaluate(() => window.scrollY)).toBe(readingScrollY);
 });
 
 test("ツール呼び出しを開くと入力と結果の要約を表示する", async ({ page }, testInfo) => {
   await page.goto(claudeCartThreadPath);
+  // このセッションのツール呼び出しは、最初と最新の発言の間にあり畳まれているため、開いてから押す。
+  await page.getByRole("button", { name: "他 2 件" }).click();
 
   const toolCall = page.getByTestId("tool-call");
   await expect(toolCall).toHaveAttribute("aria-expanded", "false");

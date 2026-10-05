@@ -1,5 +1,6 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { TimelinePage } from "../../server/src/post.js";
+import { expectedPostGroups, renderedPostGroups } from "../post-groups.js";
 
 // 相対時刻をスクリーンショットごとに同じにするため、fixture の最も新しい投稿 (2026-10-02T10:30:10Z) の少し後で時計を止める。
 const fixedNow = new Date("2026-10-02T10:31:00.000Z");
@@ -45,6 +46,28 @@ test("Claude Code と Codex の投稿を新しい順に表示する", async ({ p
   ).toHaveCount(humanPostCount);
 
   await page.screenshot({ path: testInfo.outputPath("timeline.png"), fullPage: true });
+});
+
+test("同じセッションの連続する投稿を、先頭だけに投稿者を出し縦線でつないだ 1 つのまとまりにする", async ({
+  page,
+}) => {
+  const allPosts = await requestAllPosts(page);
+  await page.goto("/");
+
+  const posts = page.getByTestId("post");
+  await expect(posts).toHaveCount(allPosts.length);
+  // fixture の 4 つのセッションの投稿は、日時が重ならず、セッションごとに続けて並ぶ。
+  const groups = expectedPostGroups(allPosts);
+  expect(groups).toHaveLength(4);
+  expect(await renderedPostGroups(posts)).toEqual(groups);
+  await expect(page.getByTestId("avatar")).toHaveCount(groups.length);
+  // まとまりの続きでも、人間の指示の行とツール呼び出しの 1 行の表示は残る。fixture の人間の指示は、どれもセッションの
+  // 最初の発言で、新しい順のまとまりの末尾 (続きの投稿) に並ぶ。
+  const continuedPosts = page.locator(".timeline-post-continued");
+  await expect(continuedPosts.getByTestId("tool-call")).toHaveCount(4);
+  await expect(continuedPosts.getByTestId("human-context")).toHaveCount(
+    allPosts.filter((post) => post.author === "human").length,
+  );
 });
 
 test("長い本文を省略して開けるようにし、ツール呼び出しを 1 行に畳む", async ({
@@ -108,4 +131,7 @@ test("下まで読むと続きを読み込む", async ({ page }) => {
   // 14 件を 5 件ずつ読むため、最初のページと 2 回の続きを読む。
   expect(requestedCursors).toHaveLength(3);
   expect(requestedCursors[0]).toBeNull();
+  // ページの境目がまとまりの途中にあっても (2 つ目のセッションの 3 件は 5 件目と 6 件目の間で分かれる)、
+  // 同じセッションなら前のまとまりにつながる。
+  expect(await renderedPostGroups(page.getByTestId("post"))).toEqual(expectedPostGroups(allPosts));
 });
