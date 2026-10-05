@@ -31,6 +31,8 @@ interface WatchedLogRoot {
  *
  * 全てのファイルを定期的に見ないのは、数万のセッションのログ (2026-10-06 に開発者のマシンで約 4.9 万ファイル) を
  * 1 秒ごとに stat すると、ログが変わらない間も CPU を 1 コア以上使い続けたため (https://github.com/bannzai/agent-timeline/issues/25 )。
+ * Linux では Node がファイルとディレクトリごとに inotify の見張りを置くため、ログのファイルの数だけ見張りが要る
+ * (上限は fs.inotify.max_user_watches。2026-10-06 の GitHub Actions の ubuntu-latest は 655360 で、約 5 万ファイルを見張れた)。
  */
 export function createLogWatcher(logRoots: LogRoots, notifyIntervalMs: number): LogWatcher {
   const listeners = new Set<LogChangeListener>();
