@@ -1,35 +1,58 @@
 import { type MouseEvent, useEffect, useLayoutEffect, useRef, useState } from "react";
 import type { PostSession } from "../../server/src/post.js";
-import { type Route, routeFromPath, threadPath } from "./route";
+import { ProjectPage, ProjectRow, WorktreePage } from "./Projects";
+import { handleInAppLinkClick, type Route, routeFromPath, routePath } from "./route";
 import { Thread } from "./Thread";
 import { Timeline } from "./Timeline";
 
-/** スレッドへ移った時に履歴へ入れる印。戻るボタンが、ブラウザの戻ると同じくタイムラインへ戻れるかを知るために使う。 */
-interface ThreadHistoryState {
-  /** タイムラインの投稿を押してスレッドへ移ったこと。履歴の 1 つ前がタイムラインであることを表す。 */
-  openedFromTimeline: true;
+/** スレッドを除いた画面の場所。投稿を並べる画面で、スレッドを開いている間も隠して残す。 */
+type ListRoute = Exclude<Route, { screen: "thread" }>;
+
+/** アプリの中で画面を移った時に履歴へ入れる印。戻るボタンが、ブラウザの戻ると同じく元の画面へ戻れるかを知るために使う。 */
+interface InAppHistoryState {
+  /** アプリの中の画面から移ってきたこと。履歴の 1 つ前がこのアプリの画面であることを表す。 */
+  openedInApp: true;
 }
 
-/** 履歴の state が、タイムラインからスレッドへ移った時に入れたものか。 */
-function isOpenedFromTimeline(state: unknown): state is ThreadHistoryState {
-  return typeof state === "object" && state !== null && "openedFromTimeline" in state;
+/** 履歴の state が、アプリの中で画面を移った時に入れたものか。 */
+function isOpenedInApp(state: unknown): state is InAppHistoryState {
+  return typeof state === "object" && state !== null && "openedInApp" in state;
 }
 
 /**
- * 画面のルート。URL のパスからタイムラインとスレッドを切り替える。
- * スレッドを開いている間もタイムラインを隠して残し、戻った時に読み込んだ投稿と読んでいた位置をそのまま出す。
+ * 画面のルート。URL のパスからタイムライン・プロジェクトのページ・worktree のページ・スレッドを切り替える。
+ * スレッドを開いている間も元の画面を隠して残し、戻った時に読み込んだ投稿と読んでいた位置をそのまま出す。
  */
 export function App() {
   const [route, setRoute] = useState<Route>(() => routeFromPath(window.location.pathname));
-  // スレッドを開く直前のタイムラインのスクロールの位置。
-  const timelineScrollYRef = useRef(0);
-  // いま出している画面。ブラウザの戻る・進むの通知で、離れる画面がタイムラインかを知るために使う。
-  const currentScreenRef = useRef(route.screen);
+  // スレッドの下に隠して残す画面。スレッドの URL を直接開いた時はタイムライン。
+  const [listRoute, setListRoute] = useState<ListRoute>(() =>
+    route.screen === "thread" ? { screen: "home" } : route,
+  );
+  // 画面の URL のパスごとの、その画面から離れた時のスクロールの位置。
+  const scrollYByListPathRef = useRef(new Map<string, number>());
+  // いま出している画面。ブラウザの戻る・進むの通知で、離れる画面を知るために使う。
+  const currentRouteRef = useRef(route);
+
+  /** 画面の場所を替える。スレッドでない画面は、スレッドを開いた時に隠して残す画面にもする。 */
+  const showRoute = (nextRoute: Route) => {
+    setRoute(nextRoute);
+    if (nextRoute.screen !== "thread") {
+      setListRoute(nextRoute);
+    }
+  };
+
+  /** 離れる画面が投稿を並べる画面なら、読んでいた位置を残す。 */
+  const rememberListScrollY = (leavingRoute: Route) => {
+    if (leavingRoute.screen !== "thread") {
+      scrollYByListPathRef.current.set(routePath(leavingRoute), window.scrollY);
+    }
+  };
 
   useEffect(() => {
-    // 戻った時のスクロールの位置は、隠して残したタイムラインに合わせてこの画面が戻す。
+    // 戻った時のスクロールの位置は、隠して残した画面に合わせてこの画面が戻す。
     window.history.scrollRestoration = "manual";
-    // スレッドとして読めない URL (`/sessions/gemini/abc` など) はタイムラインを出すため、URL もタイムラインの `/` に直す。
+    // 画面の場所として読めない URL (`/sessions/gemini/abc` など) はタイムラインを出すため、URL もタイムラインの `/` に直す。
     if (
       routeFromPath(window.location.pathname).screen === "home" &&
       window.location.pathname !== "/"
@@ -37,56 +60,61 @@ export function App() {
       window.history.replaceState(null, "", "/");
     }
     /**
-     * ブラウザの戻る・進むで変わった URL を、画面の場所に写す。タイムラインから離れる時は、読んでいた位置を残す
-     * (scrollRestoration が manual のため、通知の時点のスクロールの位置はまだタイムラインのもの)。
+     * ブラウザの戻る・進むで変わった URL を、画面の場所に写す。投稿を並べる画面から離れる時は、読んでいた位置を残す
+     * (scrollRestoration が manual のため、通知の時点のスクロールの位置はまだ離れる画面のもの)。
      */
     const onPopState = () => {
-      if (currentScreenRef.current === "home") {
-        timelineScrollYRef.current = window.scrollY;
-      }
-      setRoute(routeFromPath(window.location.pathname));
+      rememberListScrollY(currentRouteRef.current);
+      showRoute(routeFromPath(window.location.pathname));
     };
     window.addEventListener("popstate", onPopState);
     return () => window.removeEventListener("popstate", onPopState);
   }, []);
 
   useLayoutEffect(() => {
-    currentScreenRef.current = route.screen;
-    window.scrollTo(0, route.screen === "home" ? timelineScrollYRef.current : 0);
+    currentRouteRef.current = route;
+    window.scrollTo(
+      0,
+      route.screen === "thread" ? 0 : (scrollYByListPathRef.current.get(routePath(route)) ?? 0),
+    );
   }, [route]);
 
-  /** セッションのスレッドへ移り、履歴に積む。ブラウザの戻るでタイムラインへ戻れる。 */
-  const openThread = (session: PostSession) => {
-    timelineScrollYRef.current = window.scrollY;
+  /** 画面を移り、履歴に積む。ブラウザの戻るで元の画面へ戻れる。 */
+  const navigate = (nextRoute: Route) => {
+    rememberListScrollY(route);
     window.history.pushState(
-      { openedFromTimeline: true } satisfies ThreadHistoryState,
+      { openedInApp: true } satisfies InAppHistoryState,
       "",
-      threadPath(session),
+      routePath(nextRoute),
     );
-    setRoute(routeFromPath(threadPath(session)));
+    showRoute(nextRoute);
   };
 
-  /** スレッドからタイムラインへ戻る。 */
-  const backToTimeline = () => {
-    if (isOpenedFromTimeline(window.history.state)) {
+  /**
+   * 1 つ前の画面へ戻る。アプリの中の画面から移ってきた時は、ブラウザの戻ると同じく履歴を戻る。
+   * URL を直接開いた時は、履歴の前がこのアプリではないため、同じ履歴の位置で parentRoute に替える。
+   */
+  const goBack = (parentRoute: Route) => {
+    if (isOpenedInApp(window.history.state)) {
       window.history.back();
       return;
     }
-    // スレッドの URL を直接開いた時は、履歴の前がこのアプリではないため、同じ履歴の位置でタイムラインに替える。
-    window.history.replaceState(null, "", "/");
-    setRoute({ screen: "home" });
+    window.history.replaceState(null, "", routePath(parentRoute));
+    showRoute(parentRoute);
   };
 
-  /** メニューのホームへのリンクを押した時の処理。ページを読み直さず、タイムラインへ戻る。 */
+  /** セッションのスレッドへ移る。 */
+  const openThread = (session: PostSession) => {
+    navigate({ screen: "thread", agent: session.agent, sessionId: session.sessionId });
+  };
+
+  /** メニューのホームへのリンクを押した時の処理。ページを読み直さず、タイムラインへ移る。 */
   const onHomeLinkClick = (event: MouseEvent<HTMLAnchorElement>) => {
-    // 修飾キー付きのクリックは、ブラウザの既定 (新しいタブで開くなど) に任せる。
-    if (event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) {
-      return;
-    }
-    event.preventDefault();
-    if (route.screen !== "home") {
-      backToTimeline();
-    }
+    handleInAppLinkClick(event, () => {
+      if (route.screen !== "home") {
+        navigate({ screen: "home" });
+      }
+    });
   };
 
   return (
@@ -107,13 +135,71 @@ export function App() {
         </a>
       </nav>
       <main className="main-column">
-        <div hidden={route.screen !== "home"}>
-          <Timeline onOpenThread={openThread} />
+        <div hidden={route.screen === "thread"}>
+          <ListScreen
+            key={routePath(listRoute)}
+            listRoute={listRoute}
+            onNavigate={navigate}
+            onBack={goBack}
+            onOpenThread={openThread}
+          />
         </div>
         {route.screen === "thread" && (
-          <Thread agent={route.agent} sessionId={route.sessionId} onBack={backToTimeline} />
+          <Thread
+            agent={route.agent}
+            sessionId={route.sessionId}
+            onBack={() => goBack(listRoute)}
+          />
         )}
       </main>
     </div>
   );
+}
+
+/** 投稿を並べる画面。タイムライン・プロジェクトのページ・worktree のページのどれかを出す。 */
+function ListScreen({
+  listRoute,
+  onNavigate,
+  onBack,
+  onOpenThread,
+}: {
+  listRoute: ListRoute;
+  onNavigate: (nextRoute: Route) => void;
+  onBack: (parentRoute: Route) => void;
+  onOpenThread: (session: PostSession) => void;
+}) {
+  switch (listRoute.screen) {
+    case "home":
+      return (
+        <>
+          <header className="column-header">
+            <h1 className="column-title">ホーム</h1>
+          </header>
+          <ProjectRow
+            onOpenProject={(projectName) => onNavigate({ screen: "project", projectName })}
+          />
+          <Timeline filter={null} onOpenThread={onOpenThread} />
+        </>
+      );
+    case "project":
+      return (
+        <ProjectPage
+          projectName={listRoute.projectName}
+          onBack={() => onBack({ screen: "home" })}
+          onOpenWorktree={(worktreeName) =>
+            onNavigate({ screen: "worktree", projectName: listRoute.projectName, worktreeName })
+          }
+          onOpenThread={onOpenThread}
+        />
+      );
+    case "worktree":
+      return (
+        <WorktreePage
+          projectName={listRoute.projectName}
+          worktreeName={listRoute.worktreeName}
+          onBack={() => onBack({ screen: "project", projectName: listRoute.projectName })}
+          onOpenThread={onOpenThread}
+        />
+      );
+  }
 }
