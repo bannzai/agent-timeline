@@ -5,8 +5,8 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { createLogWatcher, type LogChangeListener } from "./log-watcher.js";
 import type { LogRoots } from "./timeline.js";
 
-// テストを待つ時間を短くするため、見張りの間隔を短くする。
-const pollIntervalMs = 20;
+// テストを待つ時間を短くするため、知らせをまとめる間隔を短くする。
+const notifyIntervalMs = 20;
 
 const claudeCart = "3f2a9c1e-5b7d-4e8a-9c6f-1a2b3c4d5e6f";
 const codexNewSession = "0199c3d4-e5f6-7a8b-9c0d-1e2f3a4b5c6d";
@@ -35,9 +35,9 @@ afterEach(async () => {
   await rm(temporaryDirectory, { recursive: true, force: true });
 });
 
-/** 見張りを作って listener の購読を始め、基準ができるまで待つ。 */
-async function subscribe(listener: LogChangeListener): Promise<void> {
-  unsubscribers.push(await createLogWatcher(logRoots, pollIntervalMs).subscribe(listener));
+/** 見張りを作って listener の購読を始める。 */
+function subscribe(listener: LogChangeListener): void {
+  unsubscribers.push(createLogWatcher(logRoots, notifyIntervalMs).subscribe(listener));
 }
 
 /** 一時ディレクトリの claudeCart のログのファイル。 */
@@ -49,10 +49,25 @@ function claudeCartLogPath(): string {
   );
 }
 
+/** codexNewSession のログのファイルを、一時ディレクトリの Codex のルートに書く。 */
+async function writeCodexNewSessionLog(): Promise<void> {
+  const dayDirectory = path.join(logRoots.codexSessionsDirectory, "2026", "10", "03");
+  await mkdir(dayDirectory, { recursive: true });
+  await writeFile(
+    path.join(dayDirectory, `rollout-2026-10-03T09-00-00-${codexNewSession}.jsonl`),
+    "{}\n",
+  );
+}
+
+/** 見張りが変更の通知を何度かまとめ終えるまで待つ。 */
+function waitForNotifyIntervals(): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, notifyIntervalMs * 5));
+}
+
 describe("createLogWatcher", () => {
   it("ログが追記されたセッションを知らせる", async () => {
     const listener = vi.fn<LogChangeListener>();
-    await subscribe(listener);
+    subscribe(listener);
 
     await appendFile(claudeCartLogPath(), "\n{}\n");
 
@@ -63,14 +78,21 @@ describe("createLogWatcher", () => {
 
   it("新しく現れたセッションを知らせる", async () => {
     const listener = vi.fn<LogChangeListener>();
-    await subscribe(listener);
+    subscribe(listener);
 
-    const dayDirectory = path.join(logRoots.codexSessionsDirectory, "2026", "10", "03");
-    await mkdir(dayDirectory, { recursive: true });
-    await writeFile(
-      path.join(dayDirectory, `rollout-2026-10-03T09-00-00-${codexNewSession}.jsonl`),
-      "{}\n",
+    await writeCodexNewSessionLog();
+
+    await vi.waitFor(() =>
+      expect(listener).toHaveBeenCalledWith([{ agent: "codex", sessionId: codexNewSession }]),
     );
+  });
+
+  it("購読を始めた時に無かったルートが現れたら、そのセッションを知らせる", async () => {
+    await rm(logRoots.codexSessionsDirectory, { recursive: true });
+    const listener = vi.fn<LogChangeListener>();
+    subscribe(listener);
+
+    await writeCodexNewSessionLog();
 
     await vi.waitFor(() =>
       expect(listener).toHaveBeenCalledWith([{ agent: "codex", sessionId: codexNewSession }]),
@@ -79,25 +101,54 @@ describe("createLogWatcher", () => {
 
   it("ログが変わらない間は知らせない", async () => {
     const listener = vi.fn<LogChangeListener>();
-    await subscribe(listener);
+    subscribe(listener);
 
-    // 見張りが何度か見るまで待つ。
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs * 5));
+    await waitForNotifyIntervals();
+
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("subagent のログの変化は知らせない", async () => {
+    const subagentsDirectory = path.join(
+      logRoots.claudeCodeProjectsDirectory,
+      "-home-dev-acme-shop",
+      claudeCart,
+      "subagents",
+    );
+    await mkdir(subagentsDirectory, { recursive: true });
+    const listener = vi.fn<LogChangeListener>();
+    subscribe(listener);
+
+    await writeFile(path.join(subagentsDirectory, "agent-1.jsonl"), "{}\n");
+    await waitForNotifyIntervals();
 
     expect(listener).not.toHaveBeenCalled();
   });
 
   it("購読をやめた listener には知らせない", async () => {
-    const watcher = createLogWatcher(logRoots, pollIntervalMs);
+    const watcher = createLogWatcher(logRoots, notifyIntervalMs);
     const stoppedListener = vi.fn<LogChangeListener>();
     const activeListener = vi.fn<LogChangeListener>();
-    const unsubscribe = await watcher.subscribe(stoppedListener);
-    unsubscribers.push(await watcher.subscribe(activeListener));
+    const unsubscribe = watcher.subscribe(stoppedListener);
+    unsubscribers.push(watcher.subscribe(activeListener));
     unsubscribe();
 
     await appendFile(claudeCartLogPath(), "\n{}\n");
 
     await vi.waitFor(() => expect(activeListener).toHaveBeenCalled());
     expect(stoppedListener).not.toHaveBeenCalled();
+  });
+
+  it("購読者が全ていなくなった後に購読を始め直すと、また知らせる", async () => {
+    const watcher = createLogWatcher(logRoots, notifyIntervalMs);
+    watcher.subscribe(vi.fn<LogChangeListener>())();
+    const listener = vi.fn<LogChangeListener>();
+    unsubscribers.push(watcher.subscribe(listener));
+
+    await appendFile(claudeCartLogPath(), "\n{}\n");
+
+    await vi.waitFor(() =>
+      expect(listener).toHaveBeenCalledWith([{ agent: "claude-code", sessionId: claudeCart }]),
+    );
   });
 });
