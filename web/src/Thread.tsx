@@ -11,6 +11,7 @@ import {
   Spinner,
   ToolCallDetails,
 } from "./PostParts";
+import { expandThreadFold, foldThreadPosts } from "./thread-fold";
 
 /** スレッドの API の読み込みの状態。not-found はセッションが無い (404) ことを表す。 */
 type ThreadState =
@@ -26,7 +27,7 @@ type ReplySendState =
   | { status: "sent" }
   | { status: "failed"; reason: string };
 
-/** 1 つのセッションのスレッド。セッションの発言を古い順に、返信の連なりとして並べる。 */
+/** 1 つのセッションのスレッド。セッションの発言を新しい順に、返信の連なりとして並べる。 */
 export function Thread({
   agent,
   sessionId,
@@ -99,7 +100,7 @@ export function Thread({
     };
   }, [loadThread]);
 
-  // このセッションのログが追記された時と、知らせにつながった時に読み直し、増えた発言を末尾に並べる。
+  // このセッションのログが追記された時と、知らせにつながった時に読み直し、増えた発言を先頭に並べる。
   useLogChanges((changedSessions) => {
     if (
       changedSessions === null ||
@@ -131,15 +132,7 @@ export function Thread({
           <p>読み込めませんでした</p>
         </div>
       )}
-      {threadState.status === "loaded" &&
-        threadState.posts.map((post, postIndex) => (
-          <ThreadPost
-            key={post.id}
-            post={post}
-            now={now}
-            hasReply={postIndex < threadState.posts.length - 1}
-          />
-        ))}
+      {/* 発言は新しい順に並ぶため、返信欄は最新の発言と並ぶ一番上に置く。 */}
       {threadState.status === "loaded" &&
         (threadState.reply.available ? (
           <ReplyComposer agent={agent} sessionId={sessionId} />
@@ -148,11 +141,15 @@ export function Thread({
             {threadState.reply.reason}
           </p>
         ))}
+      {/* key は、セッションが替わった時に前のセッションで開いた「他 x 件」を持ち越さないためのもの。 */}
+      {threadState.status === "loaded" && (
+        <FoldedThreadPosts key={`${agent}:${sessionId}`} posts={threadState.posts} now={now} />
+      )}
     </section>
   );
 }
 
-/** スレッドの末尾の返信欄。書いた 1 行を、このセッションが動いている tmux の pane へ指示として送る。 */
+/** スレッドの一番上の返信欄。書いた 1 行を、このセッションが動いている tmux の pane へ指示として送る。 */
 function ReplyComposer({ agent, sessionId }: { agent: AgentKind; sessionId: string }) {
   const [text, setText] = useState("");
   const [sendState, setSendState] = useState<ReplySendState>({ status: "idle" });
@@ -236,6 +233,41 @@ function ReplyComposer({ agent, sessionId }: { agent: AgentKind; sessionId: stri
         {sendState.status === "failed" && `届きませんでした (${sendState.reason})`}
       </p>
     </div>
+  );
+}
+
+/**
+ * スレッドの発言の並び。最新の発言を一番上に、セッションの最初の発言を一番下に出し、間の発言を「他 x 件」に畳む。
+ * posts はスレッドの発言 (古い順)。「他 x 件」を押すと、畳んだ発言を最新側から開く。
+ */
+function FoldedThreadPosts({ posts, now }: { posts: Post[]; now: Date }) {
+  // 「他 x 件」で開いた発言のうち最も古いものの id。何も開いていない時は null。
+  const [expandedOldestPostId, setExpandedOldestPostId] = useState<string | null>(null);
+  const { newerPosts, foldedCount, firstPost } = foldThreadPosts(posts, expandedOldestPostId);
+  return (
+    <>
+      {newerPosts.map((post) => (
+        <ThreadPost key={post.id} post={post} now={now} hasReply={true} />
+      ))}
+      {foldedCount > 0 && (
+        <div className="thread-fold">
+          <div className="avatar-column">
+            <div className="thread-line thread-line-folded" />
+          </div>
+          <button
+            type="button"
+            className="thread-fold-button"
+            data-testid="thread-fold"
+            onClick={() => setExpandedOldestPostId(expandThreadFold(posts, foldedCount))}
+          >
+            他 {foldedCount} 件
+          </button>
+        </div>
+      )}
+      {firstPost !== null && (
+        <ThreadPost key={firstPost.id} post={firstPost} now={now} hasReply={false} />
+      )}
+    </>
   );
 }
 
