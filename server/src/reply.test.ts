@@ -12,6 +12,18 @@ const claudeCart = "3f2a9c1e-5b7d-4e8a-9c6f-1a2b3c4d5e6f";
 const claudeReadme = "8d4e2f6a-1c3b-4a5d-8e7f-9a0b1c2d3e4f";
 const codexUnit = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 const codexTax = "0199b2c3-d4e5-7f6a-9b0c-1d2e3f4a5b6c";
+/** fixtures/ の claudeCart と codexTax のセッションの作業ディレクトリ。 */
+const claudeCartDirectory = "/home/dev/acme-shop";
+const codexTaxDirectory = "/home/dev/worktrees/dev/acme-shop/fix-tax-rounding";
+
+/** セッションの作業ディレクトリに、指定した引数の agent が 1 つ動いている pane の表。 */
+function singleAgentPaneTables(sessionId: string, agentArgs: string) {
+  const directory = sessionId === codexTax ? codexTaxDirectory : claudeCartDirectory;
+  return {
+    panes: [`%1\t1001\t0\t${directory}`],
+    processes: [" 1001     1 Ss   -zsh", ` 1101  1001 S+   ${agentArgs}`],
+  };
+}
 
 /** このアプリの画面のオリジン。ブラウザは、画面を開いた URL のオリジンを Origin に入れて API を呼ぶ。 */
 const appOrigin = "http://127.0.0.1:7878";
@@ -132,7 +144,7 @@ describe("スレッドの API の返信できるか", () => {
   it("作業ディレクトリに agent の pane が無い時は、返信できない理由を返す", async () => {
     const { app } = await prepareReplyTest();
 
-    // notes-app の pane ではシェルだけが動いている。acme-shop の pane で動いているのは Claude Code で、Codex ではない。
+    // notes-app の pane ではシェルだけが動いている。codexTax の作業ディレクトリ (acme-shop の worktree) には pane が無い。
     for (const sessionPath of [`claude-code/${claudeReadme}`, `codex/${codexTax}`]) {
       expect(await requestReplyTarget(app, sessionPath)).toEqual({
         available: false,
@@ -143,14 +155,18 @@ describe("スレッドの API の返信できるか", () => {
 
   it("pane のシェルの直下のプロセスだけを見て、agent がツールとして起動した別の agent を pane の agent とみなさない", async () => {
     const context = await prepareReplyTest();
-    // acme-shop の pane の Claude Code が、レビューのために codex を起動している。
+    // どちらのセッションの作業ディレクトリでも、pane の Claude Code がレビューのために codex を起動している。
     await replaceFakeTables(context, {
-      panes: ["%1\t1001\t0\t/home/dev/acme-shop"],
+      panes: [`%1\t1001\t0\t${claudeCartDirectory}`, `%2\t2001\t0\t${codexTaxDirectory}`],
       processes: [
         " 1001     1 Ss   -zsh",
         " 1101  1001 S+   claude",
         " 1201  1101 S+   /bin/zsh -c codex exec review",
         " 1202  1201 S+   codex exec review",
+        " 2001     1 Ss   -zsh",
+        " 2101  2001 S+   claude",
+        " 2201  2101 S+   /bin/zsh -c codex exec review",
+        " 2202  2201 S+   codex exec review",
       ],
     });
 
@@ -202,10 +218,7 @@ describe("スレッドの API の返信できるか", () => {
     "対話でない起動 (%s) の agent の pane は、端末の入力を読まないため送り先にしない",
     async (_, agent, sessionId, agentArgs) => {
       const context = await prepareReplyTest();
-      await replaceFakeTables(context, {
-        panes: ["%1\t1001\t0\t/home/dev/acme-shop"],
-        processes: [" 1001     1 Ss   -zsh", ` 1101  1001 S+   ${agentArgs}`],
-      });
+      await replaceFakeTables(context, singleAgentPaneTables(sessionId, agentArgs));
 
       expect((await requestReplyTarget(context.app, `${agent}/${sessionId}`)).available).toBe(
         false,
@@ -229,10 +242,7 @@ describe("スレッドの API の返信できるか", () => {
     ],
   ])("対話の起動 (%s) の agent の pane は送り先にする", async (_, agent, sessionId, agentArgs) => {
     const context = await prepareReplyTest();
-    await replaceFakeTables(context, {
-      panes: ["%1\t1001\t0\t/home/dev/acme-shop"],
-      processes: [" 1001     1 Ss   -zsh", ` 1101  1001 S+   ${agentArgs}`],
-    });
+    await replaceFakeTables(context, singleAgentPaneTables(sessionId, agentArgs));
 
     expect(await requestReplyTarget(context.app, `${agent}/${sessionId}`)).toEqual({
       available: true,

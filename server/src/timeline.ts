@@ -1,8 +1,17 @@
 import { readFile, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { listClaudeCodeSessionLogFiles, parseClaudeCodeSessionLog } from "./claude-code-log.js";
-import { listCodexSessionLogFiles, parseCodexSessionLog } from "./codex-log.js";
+import {
+  listClaudeCodeSessionLogFiles,
+  parseClaudeCodeSessionLog,
+  readClaudeCodeSessionStart,
+  readClaudeCodeSessionStartDirectory,
+} from "./claude-code-log.js";
+import {
+  listCodexSessionLogFiles,
+  parseCodexSessionLog,
+  readCodexSessionStart,
+} from "./codex-log.js";
 import {
   type AgentKind,
   compareNewestFirst,
@@ -10,8 +19,17 @@ import {
   parseJson,
   type Post,
   type SessionLogFile,
+  type SessionStart,
   type TimelinePage,
 } from "./post.js";
+import {
+  type Checkout,
+  checkoutOfDirectory,
+  isCheckoutInFilter,
+  type Project,
+  type TimelineFilter,
+  type Worktree,
+} from "./project.js";
 
 /** agent ごとのセッションのログのルートディレクトリ。 */
 export interface LogRoots {
@@ -70,15 +88,59 @@ async function readSessionPosts(sessionLogFile: SessionLogFile): Promise<Post[]>
     : parseCodexSessionLog(sessionLogFile.sessionId, logText);
 }
 
-/** 全セッションの投稿を新しい順に、cursor より古いものから最大 limit 件返す。 */
+/** ログのファイルのパスごとの、セッションを始めた時の作業ディレクトリとブランチ。ログは追記だけされ先頭の行は変わらないため、読んだものを覚えておく。 */
+const sessionStartsByLogPath = new Map<string, SessionStart>();
+
+/** セッションを始めた時の作業ディレクトリとブランチを返す。まだログに書かれていなければ null を返す。 */
+async function readSessionStart(sessionLogFile: SessionLogFile): Promise<SessionStart | null> {
+  const knownSessionStart = sessionStartsByLogPath.get(sessionLogFile.path);
+  if (knownSessionStart !== undefined) {
+    return knownSessionStart;
+  }
+  const sessionStart =
+    sessionLogFile.agent === "claude-code"
+      ? await readClaudeCodeSessionStart(sessionLogFile.path)
+      : await readCodexSessionStart(sessionLogFile.path);
+  if (sessionStart !== null) {
+    sessionStartsByLogPath.set(sessionLogFile.path, sessionStart);
+  }
+  return sessionStart;
+}
+
+/**
+ * セッションが属する checkout を、セッションを始めた作業ディレクトリから返す。分からなければ null を返す。
+ * セッションがどのプロジェクトと worktree のものかは、この checkout で決める (documents/PROJECT.md「プロジェクトと worktree」)。
+ */
+async function readSessionCheckout(sessionLogFile: SessionLogFile): Promise<Checkout | null> {
+  return checkoutOfDirectory(
+    sessionLogFile.agent === "claude-code"
+      ? await readClaudeCodeSessionStartDirectory(sessionLogFile.path)
+      : ((await readSessionStart(sessionLogFile))?.projectDirectory ?? null),
+  );
+}
+
+/**
+ * 全セッションの投稿を新しい順に、cursor より古いものから最大 limit 件返す。
+ * filter を渡すと、そのプロジェクトか worktree のセッションの投稿だけを返す。
+ */
 export async function readTimeline(
   logRoots: LogRoots,
-  { limit, cursor }: { limit: number; cursor: TimelineCursor | null },
+  {
+    limit,
+    cursor,
+    filter,
+  }: { limit: number; cursor: TimelineCursor | null; filter?: TimelineFilter },
 ): Promise<TimelinePage> {
   // ファイルの中の投稿の日時は、そのファイルの最終更新の日時を超えない。そこで最終更新が新しい順に読み、
   // 残りのファイルにページへ入る投稿が無いと分かった時点で読むのをやめる。
   const sessionLogFiles: { sessionLogFile: SessionLogFile; modifiedAt: string }[] = [];
   for (const sessionLogFile of await listSessionLogFiles(logRoots)) {
+    if (
+      filter !== undefined &&
+      !isCheckoutInFilter(await readSessionCheckout(sessionLogFile), filter)
+    ) {
+      continue;
+    }
     const fileStats = await stat(sessionLogFile.path).catch(() => null);
     if (fileStats !== null) {
       sessionLogFiles.push({ sessionLogFile, modifiedAt: fileStats.mtime.toISOString() });
@@ -125,4 +187,55 @@ export async function readThread(
     return null;
   }
   return (await readSessionPosts(sessionLogFile)).sort((a, b) => compareNewestFirst(b, a));
+}
+
+/**
+ * ログがあるプロジェクトを、最近使った順に返す。最近使ったかは、投稿を読まずにログのファイルの最終更新で決める。
+ * 作業ディレクトリが分からないセッションは含めない。
+ */
+export async function readProjects(logRoots: LogRoots): Promise<Project[]> {
+  // プロジェクトと worktree の名前ごとの、最終更新が最も新しいセッションのログのファイル。
+  const newestSessions = new Map<
+    string,
+    { checkout: Checkout; sessionLogFile: SessionLogFile; modifiedAt: string }
+  >();
+  for (const sessionLogFile of await listSessionLogFiles(logRoots)) {
+    const checkout = await readSessionCheckout(sessionLogFile);
+    const fileStats = checkout === null ? null : await stat(sessionLogFile.path).catch(() => null);
+    if (checkout === null || fileStats === null) {
+      continue;
+    }
+    const modifiedAt = fileStats.mtime.toISOString();
+    const worktreeKey = JSON.stringify([checkout.projectName, checkout.worktreeName]);
+    const newestSession = newestSessions.get(worktreeKey);
+    if (newestSession === undefined || newestSession.modifiedAt < modifiedAt) {
+      newestSessions.set(worktreeKey, { checkout, sessionLogFile, modifiedAt });
+    }
+  }
+
+  const worktreesByProjectName = new Map<string, Worktree[]>();
+  for (const { checkout, sessionLogFile, modifiedAt } of newestSessions.values()) {
+    const { projectName, ...worktreeCheckout } = checkout;
+    worktreesByProjectName.set(projectName, [
+      ...(worktreesByProjectName.get(projectName) ?? []),
+      {
+        ...worktreeCheckout,
+        gitBranch: (await readSessionStart(sessionLogFile))?.gitBranch ?? null,
+        lastActiveAt: modifiedAt,
+      },
+    ]);
+  }
+  // 最終更新が同じ時は名前の順にし、同じログから毎回同じ並びを返す。
+  const compareRecentFirst = (a: Worktree, b: Worktree) =>
+    compareText(b.lastActiveAt, a.lastActiveAt) || compareText(a.worktreeName, b.worktreeName);
+  return [...worktreesByProjectName]
+    .map(([projectName, worktrees]) => ({
+      projectName,
+      worktrees: worktrees.sort(compareRecentFirst),
+    }))
+    .sort(
+      (a, b) =>
+        compareText(b.worktrees[0]?.lastActiveAt ?? "", a.worktrees[0]?.lastActiveAt ?? "") ||
+        compareText(a.projectName, b.projectName),
+    );
 }
