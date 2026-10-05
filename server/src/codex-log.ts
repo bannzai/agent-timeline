@@ -32,6 +32,25 @@ function codexSessionId(fileName: string): string {
 }
 
 /**
+ * sessionsDirectory からの相対パスのファイル名が `rollout-*.jsonl` なら、そのログのファイルを返す。それ以外は null を返す。
+ * ファイルかどうかは見ない。
+ */
+export function codexSessionLogFileAt(
+  sessionsDirectory: string,
+  relativePath: string,
+): SessionLogFile | null {
+  const fileName = path.basename(relativePath);
+  if (!/^rollout-.*\.jsonl$/.test(fileName)) {
+    return null;
+  }
+  return {
+    agent: "codex",
+    sessionId: codexSessionId(fileName),
+    path: path.join(sessionsDirectory, relativePath),
+  };
+}
+
+/**
  * `<sessionsDirectory>/<年>/<月>/<日>/rollout-*.jsonl` のログのファイルを返す。
  * ディレクトリが無い時 (Codex を使っていないマシン) は空の配列を返す。
  */
@@ -39,13 +58,9 @@ export async function listCodexSessionLogFiles(
   sessionsDirectory: string,
 ): Promise<SessionLogFile[]> {
   const relativePaths = await readdir(sessionsDirectory, { recursive: true }).catch(() => []);
-  return relativePaths
-    .filter((relativePath) => /^rollout-.*\.jsonl$/.test(path.basename(relativePath)))
-    .map((relativePath) => ({
-      agent: "codex" as const,
-      sessionId: codexSessionId(path.basename(relativePath)),
-      path: path.join(sessionsDirectory, relativePath),
-    }));
+  return relativePaths.flatMap(
+    (relativePath) => codexSessionLogFileAt(sessionsDirectory, relativePath) ?? [],
+  );
 }
 
 /** ログの行が session_meta なら、セッションを始めた時の作業ディレクトリとブランチを返す。session_meta でない行は null を返す。 */

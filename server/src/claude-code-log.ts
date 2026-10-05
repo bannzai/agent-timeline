@@ -32,8 +32,26 @@ function isPostText(text: string, author: PostAuthor): boolean {
 }
 
 /**
+ * projectsDirectory からの相対パスが `<プロジェクトの slug>/<セッション ID>.jsonl` の形なら、そのログのファイルを返す。
+ * subagent のログは `<セッション ID>/subagents/` の下にあり、セッションの会話ではないため null を返す。
+ * ファイルかどうかは見ない。
+ */
+export function claudeCodeSessionLogFileAt(
+  projectsDirectory: string,
+  relativePath: string,
+): SessionLogFile | null {
+  if (relativePath.split(path.sep).length !== 2 || !relativePath.endsWith(".jsonl")) {
+    return null;
+  }
+  return {
+    agent: "claude-code",
+    sessionId: path.basename(relativePath, ".jsonl"),
+    path: path.join(projectsDirectory, relativePath),
+  };
+}
+
+/**
  * `<projectsDirectory>/<プロジェクトの slug>/<セッション ID>.jsonl` のログのファイルを返す。
- * subagent のログは `<セッション ID>/subagents/` の下にあり、セッションの会話ではないため含めない。
  * ディレクトリが無い時 (Claude Code を使っていないマシン) は空の配列を返す。
  */
 export async function listClaudeCodeSessionLogFiles(
@@ -48,12 +66,15 @@ export async function listClaudeCodeSessionLogFiles(
     const projectDirectory = path.join(projectsDirectory, projectEntry.name);
     const logEntries = await readdir(projectDirectory, { withFileTypes: true }).catch(() => []);
     for (const logEntry of logEntries) {
-      if (logEntry.isFile() && logEntry.name.endsWith(".jsonl")) {
-        sessionLogFiles.push({
-          agent: "claude-code",
-          sessionId: path.basename(logEntry.name, ".jsonl"),
-          path: path.join(projectDirectory, logEntry.name),
-        });
+      if (!logEntry.isFile()) {
+        continue;
+      }
+      const sessionLogFile = claudeCodeSessionLogFileAt(
+        projectsDirectory,
+        path.join(projectEntry.name, logEntry.name),
+      );
+      if (sessionLogFile !== null) {
+        sessionLogFiles.push(sessionLogFile);
       }
     }
   }
