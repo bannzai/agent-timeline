@@ -264,7 +264,9 @@ test("スレッドの読み込みが知らせの間隔より遅くても、追�
     { timeout: 10_000 },
   );
   await expect(
-    page.getByRole("button", { name: `他 ${fixtureThreadPosts.length + appendedLineCount - 2} 件` }),
+    page.getByRole("button", {
+      name: `他 ${fixtureThreadPosts.length + appendedLineCount - 2} 件`,
+    }),
   ).toBeVisible();
 });
 
