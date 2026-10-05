@@ -15,6 +15,7 @@ import {
   Spinner,
   ToolCallLine,
 } from "./PostParts";
+import { groupConsecutiveSessionPosts } from "./post-groups";
 import { threadPath } from "./route";
 
 // 末尾がこの距離まで近づいたら続きを読み込む。投稿 4〜5 件ぶんの高さで、読み進める手が止まる前に次のページが届く。
@@ -176,14 +177,18 @@ export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession
           </button>
         </div>
       )}
-      {posts.map((post) => (
-        <TimelinePost
-          key={post.id}
-          post={post}
-          now={now}
-          onOpen={() => onOpenThread(post.session)}
-        />
-      ))}
+      {groupConsecutiveSessionPosts(posts).flatMap((group) =>
+        group.map((post, postIndex) => (
+          <TimelinePost
+            key={post.id}
+            post={post}
+            now={now}
+            continuesFromAbove={postIndex > 0}
+            continuesBelow={postIndex < group.length - 1}
+            onOpen={() => onOpenThread(post.session)}
+          />
+        )),
+      )}
       {nextCursor === null && posts.length === 0 && (
         <div className="empty" data-testid="timeline-empty">
           <h2 className="empty-title">まだ投稿がありません</h2>
@@ -208,11 +213,27 @@ export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession
   );
 }
 
-/** タイムラインの 1 投稿。押すとそのセッションのスレッドを開く。 */
-function TimelinePost({ post, now, onOpen }: { post: Post; now: Date; onOpen: () => void }) {
+/**
+ * タイムラインの 1 投稿。押すとそのセッションのスレッドを開く。
+ * 同じセッションの投稿が続くまとまりでは、先頭の投稿だけがアイコンと投稿者を出し、まとまりの投稿をアイコンの列の縦線でつなぐ。
+ * continuesFromAbove は上の投稿が同じまとまりにあること、continuesBelow は下の投稿が同じまとまりにあることを表す。
+ */
+function TimelinePost({
+  post,
+  now,
+  continuesFromAbove,
+  continuesBelow,
+  onOpen,
+}: {
+  post: Post;
+  now: Date;
+  continuesFromAbove: boolean;
+  continuesBelow: boolean;
+  onOpen: () => void;
+}) {
   return (
     <article
-      className="post post-clickable"
+      className={`post post-clickable${continuesFromAbove ? " timeline-post-continued" : ""}${continuesBelow ? " timeline-post-continues" : ""}`}
       data-testid="post"
       data-post-id={post.id}
       data-agent={post.session.agent}
@@ -231,16 +252,25 @@ function TimelinePost({ post, now, onOpen }: { post: Post; now: Date; onOpen: ()
         }
       }}
     >
-      {post.author === "human" && <HumanContext />}
+      {post.author === "human" && !continuesFromAbove && <HumanContext />}
       <div className="post-row">
-        <AgentAvatar session={post.session} />
+        <div className="avatar-column">
+          {!continuesFromAbove && <AgentAvatar session={post.session} />}
+          {(continuesFromAbove || continuesBelow) && (
+            <div className="thread-line" data-testid="thread-line" />
+          )}
+        </div>
         <div className="post-main">
-          <PostHeader
-            post={post}
-            now={now}
-            timeHref={threadPath(post.session)}
-            onTimeClick={onOpen}
-          />
+          {/* まとまりの続きでは、縦線を途切れさせないよう、人間の指示の行をアイコンの列の上ではなく本文の上に出す。 */}
+          {continuesFromAbove && post.author === "human" && <HumanContext />}
+          {!continuesFromAbove && (
+            <PostHeader
+              post={post}
+              now={now}
+              timeHref={threadPath(post.session)}
+              onTimeClick={onOpen}
+            />
+          )}
           {post.author === "tool" ? (
             <ToolCallLine post={post} />
           ) : (
