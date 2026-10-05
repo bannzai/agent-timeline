@@ -6,6 +6,7 @@ import {
   type TimelinePage,
   timelineMaxLimit,
 } from "../../server/src/post.js";
+import type { TimelineFilter } from "../../server/src/project.js";
 import { useLogChanges } from "./log-changes";
 import {
   AgentAvatar,
@@ -24,8 +25,31 @@ const loadMoreRootMargin = "600px";
 /** 続きの読み込みの状態。error は直前の読み込みに失敗し、もう一度読み込むボタンを出している状態。 */
 type LoadState = "idle" | "loading" | "error";
 
-/** ホームのタイムライン。全セッションの投稿を新しい順に 1 列で並べ、下まで読むと続きを読み込む。 */
-export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession) => void }) {
+/** 一覧の API の URL。filter があれば、そのプロジェクトか worktree の投稿に絞る。params は一緒に渡すクエリ。 */
+function postsUrl(filter: TimelineFilter | null, params: Record<string, string>): string {
+  const query = new URLSearchParams(params);
+  if (filter !== null) {
+    query.set("project", filter.projectName);
+    if (filter.worktreeName !== null) {
+      query.set("worktree", filter.worktreeName);
+    }
+  }
+  return `/api/posts?${query}`;
+}
+
+/**
+ * タイムライン。投稿を新しい順に 1 列で並べ、下まで読むと続きを読み込む。filter が null なら全セッションの投稿を、
+ * あればそのプロジェクトか worktree のセッションの投稿だけを並べる。filter を替える時は、key を替えて作り直す。
+ */
+export function Timeline({
+  filter,
+  onOpenThread,
+}: {
+  filter: TimelineFilter | null;
+  onOpenThread: (session: PostSession) => void;
+}) {
+  // 読み込みの関数は作った時の filter を使い続ける。filter は作り直すまで変わらない (上の説明) ため、最初の値を持つ。
+  const filterRef = useRef(filter);
   const [posts, setPosts] = useState<Post[]>([]);
   // 次に読み込むページのカーソル。undefined は最初のページをまだ読んでいない、null は続きが無いことを表す。
   // 画面の描き分けは state を、読み込みは ref を使う。ref は読み込みが終わった時点で変わるため、
@@ -52,7 +76,7 @@ export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession
     }
     loadingRef.current = true;
     setLoadState("loading");
-    fetch(cursor === undefined ? "/api/posts" : `/api/posts?${new URLSearchParams({ cursor })}`)
+    fetch(postsUrl(filterRef.current, cursor === undefined ? {} : { cursor }))
       .then(async (response) => {
         if (!response.ok) {
           throw new Error(`一覧の API が ${response.status} を返した`);
@@ -110,7 +134,7 @@ export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession
     checkingNewPostsRef.current = true;
     // 一覧の API が 1 回で返せる最も多い件数を読み、知らせの間隔 (約 1 秒) に増えた投稿を取りこぼさないようにする。
     // 1 回の間にこれより多くの投稿が増えると、溢れた分は読み直すまでタイムラインに出ない。
-    fetch(`/api/posts?${new URLSearchParams({ limit: String(timelineMaxLimit) })}`)
+    fetch(postsUrl(filterRef.current, { limit: String(timelineMaxLimit) }))
       .then(async (response) => {
         if (!response.ok) {
           throw new Error(`一覧の API が ${response.status} を返した`);
@@ -164,9 +188,6 @@ export function Timeline({ onOpenThread }: { onOpenThread: (session: PostSession
   const now = new Date();
   return (
     <section aria-label="タイムライン">
-      <header className="column-header">
-        <h1 className="column-title">ホーム</h1>
-      </header>
       {newPosts.length > 0 && (
         <div className="new-posts-bar">
           <button type="button" className="new-posts-button" onClick={showNewPosts}>

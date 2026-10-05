@@ -1,5 +1,6 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
+import { findInLogLines } from "./log-file.js";
 import {
   isRecord,
   parseJson,
@@ -8,6 +9,7 @@ import {
   postId,
   postTimestamp,
   type SessionLogFile,
+  type SessionStart,
   toolCallText,
   toolResultText,
 } from "./post.js";
@@ -56,6 +58,38 @@ export async function listClaudeCodeSessionLogFiles(
     }
   }
   return sessionLogFiles;
+}
+
+/** セッションを始めた時の作業ディレクトリとブランチを、cwd を持つ最初の行から読む。cwd を持つ行がまだ無ければ null を返す。 */
+export function readClaudeCodeSessionStart(logPath: string): Promise<SessionStart | null> {
+  return findInLogLines(logPath, (entry) =>
+    isRecord(entry) && typeof entry.cwd === "string"
+      ? {
+          projectDirectory: entry.cwd,
+          gitBranch: typeof entry.gitBranch === "string" ? entry.gitBranch : null,
+        }
+      : null,
+  );
+}
+
+/**
+ * ログのディレクトリ (プロジェクトの slug) ごとの、セッションを始めた作業ディレクトリ。Claude Code は始めた作業ディレクトリから
+ * slug を作るため、同じ slug のセッションは同じ作業ディレクトリで始まる。数万のセッションのログの先頭を全て読まずに済ませるため覚えておく。
+ */
+const startDirectoriesBySlugDirectory = new Map<string, string>();
+
+/** セッションを始めた作業ディレクトリを返す。同じ slug のログを一度読んだ後は、ログを読まずに返す。分からなければ null を返す。 */
+export async function readClaudeCodeSessionStartDirectory(logPath: string): Promise<string | null> {
+  const slugDirectory = path.dirname(logPath);
+  const knownStartDirectory = startDirectoriesBySlugDirectory.get(slugDirectory);
+  if (knownStartDirectory !== undefined) {
+    return knownStartDirectory;
+  }
+  const startDirectory = (await readClaudeCodeSessionStart(logPath))?.projectDirectory ?? null;
+  if (startDirectory !== null) {
+    startDirectoriesBySlugDirectory.set(slugDirectory, startDirectory);
+  }
+  return startDirectory;
 }
 
 /**

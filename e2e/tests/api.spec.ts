@@ -26,14 +26,18 @@ test("本番のビルドのサーバーが fixture の両 agent の投稿を返�
   }
 });
 
-test("スレッドの URL には画面を返し、/sessions/ の外の知らないパスは 404 を返す", async ({
+test("スレッドとプロジェクトの URL には画面を返し、ほかの知らないパスは 404 を返す", async ({
   request,
 }) => {
-  const threadPageResponse = await request.get(
+  for (const pagePath of [
     "/sessions/claude-code/3f2a9c1e-5b7d-4e8a-9c6f-1a2b3c4d5e6f",
-  );
-  expect(threadPageResponse.status()).toBe(200);
-  expect(threadPageResponse.headers()["content-type"]).toContain("text/html");
+    "/projects/acme-shop",
+    "/projects/acme-shop/worktrees/fix-tax-rounding",
+  ]) {
+    const pageResponse = await request.get(pagePath);
+    expect(pageResponse.status()).toBe(200);
+    expect(pageResponse.headers()["content-type"]).toContain("text/html");
+  }
 
   expect((await request.get("/no-such-page")).status()).toBe(404);
   expect((await request.get("/api/no-such-api")).status()).toBe(404);

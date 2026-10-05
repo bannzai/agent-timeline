@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { collapsedText, projectName, relativeTimeText } from "./format";
+import { collapsedText, projectInitials, projectName, relativeTimeText } from "./format";
 
 describe("relativeTimeText", () => {
   const now = new Date("2026-06-15T12:00:00.000Z");
@@ -56,5 +56,28 @@ describe("projectName", () => {
         gitBranch: null,
       }),
     ).toBe("acme-shop");
+  });
+
+  it("worktree の作業ディレクトリには、worktree ではなくプロジェクトの名前を返す", () => {
+    expect(
+      projectName({
+        agent: "codex",
+        sessionId: "session",
+        projectDirectory: "/home/dev/worktrees/dev/acme-shop/fix-tax-rounding",
+        gitBranch: "fix/tax-rounding",
+      }),
+    ).toBe("acme-shop");
+  });
+});
+
+describe("projectInitials", () => {
+  it.each([
+    ["acme-shop", "AS"],
+    ["weather_cli_tool", "WC"],
+    ["castle", "CA"],
+    ["x", "X"],
+    ["日記アプリ", "日記"],
+  ])("%s は %s", (name, expected) => {
+    expect(projectInitials(name)).toBe(expected);
   });
 });

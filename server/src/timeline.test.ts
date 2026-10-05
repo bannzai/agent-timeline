@@ -2,7 +2,7 @@ import { cp, mkdtemp, readdir, rm, utimes } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { type LogRoots, logRootsFromEnv, readTimeline } from "./timeline.js";
+import { type LogRoots, logRootsFromEnv, readProjects, readTimeline } from "./timeline.js";
 
 const claudeCart = "3f2a9c1e-5b7d-4e8a-9c6f-1a2b3c4d5e6f";
 const claudeReadme = "8d4e2f6a-1c3b-4a5d-8e7f-9a0b1c2d3e4f";
@@ -74,6 +74,57 @@ describe("readTimeline", () => {
       [codexTax, 'shell {"command":["rg","tax"]}'],
       [codexTax, "消費税の端数を切り捨てにして"],
       [codexUnit, "--unit オプションを追加しました"],
+    ]);
+  });
+});
+
+describe("readProjects", () => {
+  it("プロジェクトと worktree を、ログのファイルの最終更新が新しい順に並べる", async () => {
+    await setModifiedAt(claudeCart, "2026-10-01T09:10:20.000Z");
+    await setModifiedAt(claudeReadme, "2026-10-02T10:30:22.000Z");
+    await setModifiedAt(codexUnit, "2026-10-01T09:00:10.100Z");
+    await setModifiedAt(codexTax, "2026-10-02T10:00:15.000Z");
+
+    expect(await readProjects(copiedLogRoots)).toEqual([
+      {
+        projectName: "notes-app",
+        worktrees: [
+          {
+            worktreeName: "notes-app",
+            directory: "/home/dev/notes-app",
+            gitBranch: "main",
+            lastActiveAt: "2026-10-02T10:30:22.000Z",
+          },
+        ],
+      },
+      {
+        projectName: "acme-shop",
+        worktrees: [
+          {
+            worktreeName: "fix-tax-rounding",
+            directory: "/home/dev/worktrees/dev/acme-shop/fix-tax-rounding",
+            gitBranch: "fix/tax-rounding",
+            lastActiveAt: "2026-10-02T10:00:15.000Z",
+          },
+          {
+            worktreeName: "acme-shop",
+            directory: "/home/dev/acme-shop",
+            gitBranch: "feature/cart-total",
+            lastActiveAt: "2026-10-01T09:10:20.000Z",
+          },
+        ],
+      },
+      {
+        projectName: "weather-cli",
+        worktrees: [
+          {
+            worktreeName: "weather-cli",
+            directory: "/home/dev/weather-cli",
+            gitBranch: null,
+            lastActiveAt: "2026-10-01T09:00:10.100Z",
+          },
+        ],
+      },
     ]);
   });
 });
