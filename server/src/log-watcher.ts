@@ -58,6 +58,8 @@ export function createLogWatcher(logRoots: LogRoots, notifyIntervalMs: number): 
   let notifyTimer: NodeJS.Timeout | undefined;
   /** まだ見張れていないルートの見張りを始め直すまで待っているタイマー。 */
   let retryTimer: NodeJS.Timeout | undefined;
+  /** 見張りを止めるたびに増える番号。止める前に始まった知らせが、止めた後の状態を書き換えないように比べる。 */
+  let watchGeneration = 0;
 
   /** sessionLogFile を、次に知らせる時に見るファイルに加える。 */
   function addPendingLogFile(sessionLogFile: SessionLogFile): void {
@@ -68,11 +70,16 @@ export function createLogWatcher(logRoots: LogRoots, notifyIntervalMs: number): 
   /** pendingLogFiles のうち、大きさか最終更新の日時が変わったファイルのセッションを知らせる。 */
   async function notifyChangedSessions(): Promise<void> {
     notifyTimer = undefined;
+    const notifyGeneration = watchGeneration;
     const sessionLogFiles = [...pendingLogFiles.values()];
     pendingLogFiles.clear();
     const changedSessions: SessionsChangedEvent["sessions"] = [];
     for (const sessionLogFile of sessionLogFiles) {
       const fileStats = await stat(sessionLogFile.path).catch(() => null);
+      // stat を待つ間に見張りが止められたら、残りを見ずにやめる。
+      if (notifyGeneration !== watchGeneration) {
+        return;
+      }
       // 消えたファイルとディレクトリは知らせない。
       if (fileStats === null || !fileStats.isFile()) {
         notifiedSignatures.delete(sessionLogFile.path);
@@ -169,6 +176,7 @@ export function createLogWatcher(logRoots: LogRoots, notifyIntervalMs: number): 
 
   /** 全てのルートの見張りと待っているタイマーを止め、覚えていたファイルを忘れる。 */
   function stopWatching(): void {
+    watchGeneration++;
     for (const rootWatcher of rootWatchers.values()) {
       rootWatcher.close();
     }
