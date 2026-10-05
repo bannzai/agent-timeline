@@ -2,7 +2,13 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { createLogWatcher } from "./log-watcher.js";
 import { type SessionsChangedEvent, timelineMaxLimit } from "./post.js";
-import { decodeTimelineCursor, type LogRoots, readThread, readTimeline } from "./timeline.js";
+import {
+  decodeTimelineCursor,
+  type LogRoots,
+  readProjects,
+  readThread,
+  readTimeline,
+} from "./timeline.js";
 
 // タイムラインの 1 画面に並ぶ件数より多く、1 回の応答でログを読む量を抑えられる件数にするため。
 const timelineDefaultLimit = 50;
@@ -30,6 +36,7 @@ export function createApp(logRoots: LogRoots): Hono {
   app.get("/api/health", (c) => c.json({ status: "ok" }));
 
   // 全セッションの投稿を新しい順に返す。`limit` は件数の上限、`cursor` は直前の応答の `nextCursor`。
+  // `project` を渡すとそのプロジェクトの、さらに `worktree` を渡すとその worktree のセッションの投稿だけを返す。
   app.get("/api/posts", async (c) => {
     const limitText = c.req.query("limit");
     const limit = limitText === undefined ? timelineDefaultLimit : Number(limitText);
@@ -41,8 +48,18 @@ export function createApp(logRoots: LogRoots): Hono {
     if (cursorText !== undefined && cursor === null) {
       return c.json({ error: "cursor が読めない" }, 400);
     }
-    return c.json(await readTimeline(logRoots, { limit, cursor }));
+    const projectName = c.req.query("project");
+    const worktreeName = c.req.query("worktree");
+    if (projectName === undefined && worktreeName !== undefined) {
+      return c.json({ error: "worktree は project と一緒に指定する" }, 400);
+    }
+    const filter =
+      projectName === undefined ? undefined : { projectName, worktreeName: worktreeName ?? null };
+    return c.json(await readTimeline(logRoots, { limit, cursor, filter }));
   });
+
+  // ログがあるプロジェクトと、その worktree を最近使った順に返す。
+  app.get("/api/projects", async (c) => c.json({ projects: await readProjects(logRoots) }));
 
   // 1 つのセッションの投稿を古い順に返す。
   app.get("/api/sessions/:agent/:sessionId/posts", async (c) => {

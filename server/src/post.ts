@@ -14,6 +14,9 @@ export interface PostSession {
   gitBranch: string | null;
 }
 
+/** セッションを始めた時の作業ディレクトリとブランチ。ログの先頭の近くを読めば分かる。 */
+export type SessionStart = Pick<PostSession, "projectDirectory" | "gitBranch">;
+
 /** タイムラインとスレッドに並ぶ 1 つの発言。Claude Code と Codex の発言を同じ形で表す。 */
 export interface Post {
   /** ログの中の位置から作る (postId)、投稿を一意に指す ID。ログは追記だけされるため、同じ発言は同じ ID のままになる。 */

@@ -1,6 +1,7 @@
 import { describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import type { Post, PostSession, TimelinePage } from "./post.js";
+import type { Project } from "./project.js";
 import { logRootsFromEnv } from "./timeline.js";
 
 // vitest.config.ts が、ログのルートの環境変数を fixtures/ の合成セッションに向けている。
@@ -63,15 +64,40 @@ async function responseJson<T>(response: Response): Promise<T> {
   return (await response.json()) as T;
 }
 
-/** 一覧の API を limit=5 で呼び、1 ページを返す。cursor が null なら最初のページを返す。 */
-async function requestTimelinePage(cursor: string | null): Promise<TimelinePage> {
-  const query = new URLSearchParams({ limit: "5" });
+/**
+ * 一覧の API を呼び、1 ページを返す。cursor が null なら最初のページを返す。
+ * filters は一緒に渡すクエリで、件数の上限 (limit) と絞り込みの条件 (project・worktree) を指定する。
+ */
+async function requestTimelinePage(
+  cursor: string | null,
+  filters: Record<string, string>,
+): Promise<TimelinePage> {
+  const query = new URLSearchParams(filters);
   if (cursor !== null) {
     query.set("cursor", cursor);
   }
   const response = await app.request(`/api/posts?${query}`);
   expect(response.status).toBe(200);
   return responseJson<TimelinePage>(response);
+}
+
+/** 一覧の API の続きを最後まで取り、全ページを返す。 */
+async function requestAllTimelinePages(filters: Record<string, string>): Promise<TimelinePage[]> {
+  const pages: TimelinePage[] = [];
+  let cursor: string | null = null;
+  do {
+    const page: TimelinePage = await requestTimelinePage(cursor, filters);
+    pages.push(page);
+    cursor = page.nextCursor;
+  } while (cursor !== null);
+  return pages;
+}
+
+/** allPostsNewestFirst のうち、指定したセッションの投稿を新しい順のまま残したもの。 */
+function sessionsSummaries(sessionIds: string[]): string[][] {
+  return allPostsNewestFirst.filter(([, postSessionId]) =>
+    sessionIds.includes(postSessionId ?? ""),
+  );
 }
 
 describe("GET /api/health", () => {
@@ -138,7 +164,7 @@ describe("GET /api/posts", () => {
     expect(sessionOf(body.posts, codexTax)).toEqual({
       agent: "codex",
       sessionId: codexTax,
-      projectDirectory: "/home/dev/acme-shop",
+      projectDirectory: "/home/dev/worktrees/dev/acme-shop/fix-tax-rounding",
       gitBranch: "fix/tax-rounding",
     });
     // session_meta の git にブランチが無いセッションは null のまま返す。
@@ -161,13 +187,7 @@ describe("GET /api/posts", () => {
   });
 
   it("limit と cursor で続きを取ると、全件を抜けも重なりもなく返す", async () => {
-    const pages: TimelinePage[] = [];
-    let cursor: string | null = null;
-    do {
-      const page: TimelinePage = await requestTimelinePage(cursor);
-      pages.push(page);
-      cursor = page.nextCursor;
-    } while (cursor !== null);
+    const pages = await requestAllTimelinePages({ limit: "5" });
 
     expect(pages.map((page) => page.posts.length)).toEqual([5, 5, 4]);
     expect(pages.flatMap((page) => page.posts).map(postSummary)).toEqual(allPostsNewestFirst);
@@ -189,6 +209,110 @@ describe("GET /api/posts", () => {
     expect((await app.request("/api/posts?limit=201")).status).toBe(400);
     expect((await app.request("/api/posts?limit=abc")).status).toBe(400);
     expect((await app.request("/api/posts?cursor=not-a-cursor")).status).toBe(400);
+  });
+});
+
+describe("GET /api/posts の絞り込み", () => {
+  // fixture の acme-shop のプロジェクトは、本体の checkout (/home/dev/acme-shop) の claudeCart と、
+  // worktree (/home/dev/worktrees/dev/acme-shop/fix-tax-rounding) の codexTax の 2 つのセッションを持つ。
+  it("project でそのプロジェクトの全 worktree のセッションの投稿だけを新しい順に返す", async () => {
+    const page = await requestTimelinePage(null, { project: "acme-shop" });
+
+    expect(page.posts.map(postSummary)).toEqual(sessionsSummaries([claudeCart, codexTax]));
+    expect(page.nextCursor).toBeNull();
+  });
+
+  it.each([
+    ["fix-tax-rounding", [codexTax]],
+    ["acme-shop", [claudeCart]],
+  ])(
+    "worktree に %s を足すとその worktree のセッションの投稿だけを返す",
+    async (worktree, sessionIds) => {
+      const page = await requestTimelinePage(null, { project: "acme-shop", worktree });
+
+      expect(page.posts.map(postSummary)).toEqual(sessionsSummaries(sessionIds));
+    },
+  );
+
+  it("絞った一覧も limit と cursor で続きを取ると、抜けも重なりもなく返す", async () => {
+    const pages = await requestAllTimelinePages({ project: "acme-shop", limit: "2" });
+
+    expect(pages.map((page) => page.posts.length)).toEqual([2, 2, 2, 1]);
+    expect(pages.flatMap((page) => page.posts).map(postSummary)).toEqual(
+      sessionsSummaries([claudeCart, codexTax]),
+    );
+  });
+
+  it("ログが無いプロジェクトと worktree は空の一覧を返す", async () => {
+    expect(await requestTimelinePage(null, { project: "no-such-project" })).toEqual({
+      posts: [],
+      nextCursor: null,
+    });
+    expect(
+      await requestTimelinePage(null, { project: "acme-shop", worktree: "no-such-worktree" }),
+    ).toEqual({ posts: [], nextCursor: null });
+  });
+
+  it("project の無い worktree は 400 を返す", async () => {
+    expect((await app.request("/api/posts?worktree=fix-tax-rounding")).status).toBe(400);
+  });
+});
+
+describe("GET /api/projects", () => {
+  it("ログがあるプロジェクトと、本体の checkout と worktree をまとめた worktree の一覧を返す", async () => {
+    const response = await app.request("/api/projects");
+
+    expect(response.status).toBe(200);
+    const { projects } = await responseJson<{ projects: Project[] }>(response);
+    // 並びはログのファイルの最終更新で決まり、fixture を checkout した時刻による。並びは timeline.test.ts で確かめる。
+    expect(
+      projects
+        .map((project) => ({
+          ...project,
+          worktrees: project.worktrees.sort((a, b) => a.worktreeName.localeCompare(b.worktreeName)),
+        }))
+        .sort((a, b) => a.projectName.localeCompare(b.projectName)),
+    ).toEqual([
+      {
+        projectName: "acme-shop",
+        worktrees: [
+          {
+            worktreeName: "acme-shop",
+            directory: "/home/dev/acme-shop",
+            gitBranch: "feature/cart-total",
+            lastActiveAt: expect.any(String),
+          },
+          {
+            worktreeName: "fix-tax-rounding",
+            directory: "/home/dev/worktrees/dev/acme-shop/fix-tax-rounding",
+            gitBranch: "fix/tax-rounding",
+            lastActiveAt: expect.any(String),
+          },
+        ],
+      },
+      {
+        projectName: "notes-app",
+        worktrees: [
+          {
+            worktreeName: "notes-app",
+            directory: "/home/dev/notes-app",
+            gitBranch: "main",
+            lastActiveAt: expect.any(String),
+          },
+        ],
+      },
+      {
+        projectName: "weather-cli",
+        worktrees: [
+          {
+            worktreeName: "weather-cli",
+            directory: "/home/dev/weather-cli",
+            gitBranch: null,
+            lastActiveAt: expect.any(String),
+          },
+        ],
+      },
+    ]);
   });
 });
 
