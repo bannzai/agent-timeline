@@ -3,6 +3,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, type Page, test, type TestInfo } from "@playwright/test";
 import type { Post, TimelinePage } from "../../server/src/post.js";
+import { expectedPostGroups, renderedPostGroups } from "../post-groups.js";
 
 // playwright.config.ts の chromium-live-updates のプロジェクトで、ログのルートが写した fixture のサーバーに対して動く。
 
@@ -11,6 +12,8 @@ const fixturesDirectory = fileURLToPath(new URL("../../fixtures", import.meta.ur
 /** fixture の Claude Code のセッションのうち、カートの合計を直すもの。 */
 const claudeCart = "3f2a9c1e-5b7d-4e8a-9c6f-1a2b3c4d5e6f";
 const claudeCartThreadPath = `/sessions/claude-code/${claudeCart}`;
+/** fixture の Claude Code のセッションのうち、README を書くもの。fixture で最も新しい投稿を持つ。 */
+const claudeNotes = "8d4e2f6a-1c3b-4a5d-8e7f-9a0b1c2d3e4f";
 /** テストの中で足す、新しい Claude Code のセッション。 */
 const claudeWeather = "5c6d7e8f-9a0b-4c1d-8e2f-3a4b5c6d7e8f";
 
@@ -114,16 +117,86 @@ test("表示中にログへ追記すると新着の表示が出て、選ぶと�
   await expect(posts.first()).toHaveAttribute("data-session-id", claudeCart);
   await expect(newPostsButton).toHaveCount(0);
   expect(await page.evaluate(() => window.scrollY)).toBe(0);
+  // 新着は、先頭のまとまり (別のセッション) が挟まるため、同じセッションの前からの投稿とは別のまとまりになる。
+  const groups = await renderedPostGroups(posts);
+  expect(groups).toEqual(expectedPostGroups(await requestTimelinePosts(page)));
+  expect(groups).toHaveLength(5);
+  expect(groups[0]).toHaveLength(1);
   await page.screenshot({ path: testInfo.outputPath("live-new-posts-shown.png") });
 });
 
-test("スレッドを表示中にそのセッションへ追記すると末尾に発言が増える", async ({
+test("新着が先頭のまとまりと同じセッションなら、そのまとまりの先頭に加わる", async ({
+  page,
+}, testInfo) => {
+  const fixturePosts = await requestTimelinePosts(page);
+  await page.goto("/");
+  const posts = page.getByTestId("post");
+  await expect(posts).toHaveCount(fixturePosts.length);
+  const fixtureGroups = await renderedPostGroups(posts);
+  const topGroup = fixtureGroups[0] ?? [];
+  // fixture で最も新しい投稿は notes-app のセッションのもの。
+  await expect(posts.first()).toHaveAttribute("data-session-id", claudeNotes);
+
+  appendLogLines(claudeCodeLogPath(testInfo, "-home-dev-notes-app", claudeNotes), [
+    claudeCodeLogLine(
+      "assistant",
+      "2026-10-02T10:30:40.000Z",
+      "/home/dev/notes-app",
+      "README の手順で起動できることを確認しました",
+    ),
+  ]);
+  await page.getByRole("button", { name: "1 件の新しい投稿を表示" }).click();
+
+  await expect(posts).toHaveCount(fixturePosts.length + 1);
+  await expect(posts.first()).toContainText("README の手順で起動できることを確認しました");
+  const groups = await renderedPostGroups(posts);
+  expect(groups).toHaveLength(fixtureGroups.length);
+  expect(groups[0]).toEqual([await posts.first().getAttribute("data-post-id"), ...topGroup]);
+  expect(groups.slice(1)).toEqual(fixtureGroups.slice(1));
+  await page.screenshot({ path: testInfo.outputPath("live-new-post-joins-group.png") });
+});
+
+test("スレッドを表示中にそのセッションへ追記すると、最新の発言が入れ替わり畳んだ件数が増える", async ({
   page,
 }, testInfo) => {
   const response = await page.request.get(`/api${claudeCartThreadPath}/posts`);
   expect(response.status()).toBe(200);
   const { posts: fixtureThreadPosts } = (await response.json()) as { posts: Post[] };
   await page.goto(claudeCartThreadPath);
+  const threadPosts = page.getByTestId("thread-post");
+  await expect(threadPosts).toHaveCount(2);
+  await expect(
+    page.getByRole("button", { name: `他 ${fixtureThreadPosts.length - 2} 件` }),
+  ).toBeVisible();
+
+  appendLogLines(claudeCodeLogPath(testInfo, "-home-dev-acme-shop", claudeCart), [
+    claudeCodeLogLine("user", "2026-10-02T10:30:40.000Z", "/home/dev/acme-shop", "テストも足して"),
+    claudeCodeLogLine(
+      "assistant",
+      "2026-10-02T10:30:50.000Z",
+      "/home/dev/acme-shop",
+      "合計の再計算のテストを足しました",
+    ),
+  ]);
+
+  // 最新の発言が追記したものに替わり、前の最新の発言と追記した指示は「他 x 件」に入る。最初の発言は一番下のまま。
+  await expect(
+    page.getByRole("button", { name: `他 ${fixtureThreadPosts.length} 件` }),
+  ).toBeVisible();
+  await expect(threadPosts).toHaveCount(2);
+  await expect(threadPosts.first()).toContainText("合計の再計算のテストを足しました");
+  await expect(threadPosts.last()).toHaveAttribute("data-post-id", fixtureThreadPosts[0]?.id ?? "");
+  await page.screenshot({ path: testInfo.outputPath("live-thread-appended.png"), fullPage: true });
+});
+
+test("「他 x 件」を開いた後にスレッドへ追記すると、開いたまま先頭に発言が加わる", async ({
+  page,
+}, testInfo) => {
+  const response = await page.request.get(`/api${claudeCartThreadPath}/posts`);
+  expect(response.status()).toBe(200);
+  const { posts: fixtureThreadPosts } = (await response.json()) as { posts: Post[] };
+  await page.goto(claudeCartThreadPath);
+  await page.getByRole("button", { name: `他 ${fixtureThreadPosts.length - 2} 件` }).click();
   const threadPosts = page.getByTestId("thread-post");
   await expect(threadPosts).toHaveCount(fixtureThreadPosts.length);
 
@@ -138,16 +211,18 @@ test("スレッドを表示中にそのセッションへ追記すると末尾�
   ]);
 
   await expect(threadPosts).toHaveCount(fixtureThreadPosts.length + 2);
-  // 前からあった発言の並びはそのままで、追記した発言が末尾に増える。
-  await expect(threadPosts.first()).toHaveAttribute(
-    "data-post-id",
-    fixtureThreadPosts[0]?.id ?? "",
+  await expect(threadPosts.nth(0)).toContainText("合計の再計算のテストを足しました");
+  await expect(threadPosts.nth(1)).toContainText("テストも足して");
+  // 前からあった発言は、新しい順のまま追記した発言の下に並ぶ。
+  const threadPostIds = await threadPosts.evaluateAll((nodes) =>
+    nodes.map((node) => node.getAttribute("data-post-id")),
   );
-  await expect(threadPosts.nth(fixtureThreadPosts.length)).toContainText("テストも足して");
-  await expect(threadPosts.nth(fixtureThreadPosts.length + 1)).toContainText(
-    "合計の再計算のテストを足しました",
-  );
-  await page.screenshot({ path: testInfo.outputPath("live-thread-appended.png"), fullPage: true });
+  expect(threadPostIds.slice(2)).toEqual(fixtureThreadPosts.map((post) => post.id).reverse());
+  await expect(page.getByTestId("thread-fold")).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath("live-thread-expanded-appended.png"),
+    fullPage: true,
+  });
 });
 
 test("スレッドの読み込みが知らせの間隔より遅くても、追記が続く間に表示を更新する", async ({
@@ -183,11 +258,14 @@ test("スレッドの読み込みが知らせの間隔より遅くても、追�
     clearInterval(appendTimer);
   }
 
-  // 追記が止まった後は、最後の追記まで並ぶ。
-  await expect(page.getByTestId("thread-post")).toHaveCount(
-    fixtureThreadPosts.length + appendedLineCount,
+  // 追記が止まった後は、最後の追記が最新の発言になり、それより前の発言は「他 x 件」に入る。
+  await expect(page.getByTestId("thread-post").first()).toContainText(
+    `追記の ${appendedLineCount} 行目`,
     { timeout: 10_000 },
   );
+  await expect(
+    page.getByRole("button", { name: `他 ${fixtureThreadPosts.length + appendedLineCount - 2} 件` }),
+  ).toBeVisible();
 });
 
 test("新着を探す読み込みが知らせの間隔より遅くても、読み込みを積み重ねない", async ({
@@ -248,7 +326,6 @@ test("タイムラインからスレッドを開いても知らせの接続は 1
   await expect(page).toHaveURL(claudeCartThreadPath);
   const threadPosts = page.getByTestId("thread-post");
   await expect(threadPosts.first()).toBeVisible();
-  const threadPostCount = await threadPosts.count();
 
   appendLogLines(claudeCodeLogPath(testInfo, "-home-dev-acme-shop", claudeCart), [
     claudeCodeLogLine(
@@ -259,7 +336,7 @@ test("タイムラインからスレッドを開いても知らせの接続は 1
     ),
   ]);
 
-  await expect(threadPosts).toHaveCount(threadPostCount + 1);
+  await expect(threadPosts.first()).toContainText("スレッドとタイムラインの両方に届く発言です");
   await page.getByRole("button", { name: "戻る" }).click();
   await expect(page.getByRole("button", { name: "1 件の新しい投稿を表示" })).toBeVisible();
   expect(eventsRequestUrls).toHaveLength(1);
@@ -300,6 +377,14 @@ test("新しいセッションのファイルを足すとその投稿がタイ�
   await expect(posts.nth(0)).toHaveAttribute("data-session-id", claudeWeather);
   await expect(posts.nth(1)).toHaveAttribute("data-session-id", claudeWeather);
   await page.screenshot({ path: testInfo.outputPath("live-new-session.png") });
+
+  // 発言が 2 件のセッションのスレッドは、「他 x 件」に畳まず 2 件とも新しい順に出す。
+  await posts.nth(0).click();
+  const threadPosts = page.getByTestId("thread-post");
+  await expect(threadPosts).toHaveCount(2);
+  await expect(threadPosts.nth(0)).toContainText("週間予報のコマンドを追加しました");
+  await expect(threadPosts.nth(1)).toContainText("週間予報の表示を足して");
+  await expect(page.getByTestId("thread-fold")).toHaveCount(0);
 });
 
 test("知らせの接続が切れてもつなぎ直し、新着を表示する", async ({ page }, testInfo) => {
