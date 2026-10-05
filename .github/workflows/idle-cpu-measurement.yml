@@ -1,0 +1,34 @@
+name: Idle CPU measurement
+
+# https://github.com/bannzai/agent-timeline/issues/25 の修正前後の計測。計測用のブランチにだけ置く。
+on:
+  push:
+    branches: [issue-25-idle-cpu-measurement]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  measure:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 40
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version: 22
+      - run: cat /proc/sys/fs/inotify/max_user_watches || true
+      - run: node .github/idle-cpu/generate-logs.mjs "$RUNNER_TEMP/logs"
+      - run: find "$RUNNER_TEMP/logs" -name '*.jsonl' | wc -l
+      - name: 修正前 (main)
+        run: bash .github/idle-cpu/measure.sh before origin/main 7901
+      - name: 修正後 (issue-25)
+        run: bash .github/idle-cpu/measure.sh after origin/issue-25 7902
