@@ -1,5 +1,5 @@
-import { useCallback, useEffect, useRef, useState } from "react";
-import type { AgentKind, Post } from "../../server/src/post.js";
+import { type FormEvent, useCallback, useEffect, useRef, useState } from "react";
+import type { AgentKind, Post, ReplyTarget } from "../../server/src/post.js";
 import { projectName } from "./format";
 import { useLogChanges } from "./log-changes";
 import {
@@ -16,9 +16,16 @@ import { expandThreadFold, foldThreadPosts } from "./thread-fold";
 /** スレッドの API の読み込みの状態。not-found はセッションが無い (404) ことを表す。 */
 type ThreadState =
   | { status: "loading" }
-  | { status: "loaded"; posts: Post[] }
+  | { status: "loaded"; posts: Post[]; reply: ReplyTarget }
   | { status: "not-found" }
   | { status: "error" };
+
+/** 返信の送信の状態。failed は届かなかった理由を持つ。 */
+type ReplySendState =
+  | { status: "idle" }
+  | { status: "sending" }
+  | { status: "sent" }
+  | { status: "failed"; reason: string };
 
 /** 1 つのセッションのスレッド。セッションの発言を新しい順に、返信の連なりとして並べる。 */
 export function Thread({
@@ -60,8 +67,8 @@ export function Thread({
         if (!response.ok) {
           throw new Error(`スレッドの API が ${response.status} を返した`);
         }
-        const { posts } = (await response.json()) as { posts: Post[] };
-        setThreadState({ status: "loaded", posts });
+        const { posts, reply } = (await response.json()) as { posts: Post[]; reply: ReplyTarget };
+        setThreadState({ status: "loaded", posts, reply });
       })
       .catch(() => {
         if (!controller.signal.aborted) {
@@ -125,11 +132,107 @@ export function Thread({
           <p>読み込めませんでした</p>
         </div>
       )}
+      {/* 発言は新しい順に並ぶため、返信欄は最新の発言と並ぶ一番上に置く。 */}
+      {threadState.status === "loaded" &&
+        (threadState.reply.available ? (
+          <ReplyComposer agent={agent} sessionId={sessionId} />
+        ) : (
+          <p className="reply-unavailable" data-testid="reply-unavailable">
+            {threadState.reply.reason}
+          </p>
+        ))}
       {/* key は、セッションが替わった時に前のセッションで開いた「他 x 件」を持ち越さないためのもの。 */}
       {threadState.status === "loaded" && (
         <FoldedThreadPosts key={`${agent}:${sessionId}`} posts={threadState.posts} now={now} />
       )}
     </section>
+  );
+}
+
+/** スレッドの一番上の返信欄。書いた 1 行を、このセッションが動いている tmux の pane へ指示として送る。 */
+function ReplyComposer({ agent, sessionId }: { agent: AgentKind; sessionId: string }) {
+  const [text, setText] = useState("");
+  const [sendState, setSendState] = useState<ReplySendState>({ status: "idle" });
+
+  /** 返信欄の送信。本文を返信の API へ送り、結果を送信の状態に写す。送信中と空の本文では何もしない。 */
+  const onSubmit = (event: FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (text.trim() === "" || sendState.status === "sending") {
+      return;
+    }
+    setSendState({ status: "sending" });
+    fetch(`/api/sessions/${agent}/${encodeURIComponent(sessionId)}/replies`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text }),
+    })
+      .then(async (response) => {
+        if (response.ok) {
+          setText("");
+          setSendState({ status: "sent" });
+          return;
+        }
+        const body = (await response.json().catch(() => null)) as {
+          error?: string;
+          textTyped?: boolean;
+        } | null;
+        // 本文が pane の入力欄に残っている時に同じ本文を送り直すと、入力欄で 2 つがつながるため、返信欄からは消す。
+        if (body?.textTyped === true) {
+          setText("");
+        }
+        setSendState({
+          status: "failed",
+          reason: body?.error ?? `サーバーが ${response.status} を返しました`,
+        });
+      })
+      .catch(() => {
+        setSendState({ status: "failed", reason: "サーバーにつながりませんでした" });
+      });
+  };
+
+  return (
+    <div className="reply-composer">
+      <form className="reply-form" data-testid="reply-form" onSubmit={onSubmit}>
+        <input
+          className="reply-input"
+          type="text"
+          aria-label="返信"
+          placeholder="返信をポスト"
+          value={text}
+          // 届いた時に入力を空にするため、送信中に書き足した文が送られないまま消えないよう、送信中は書き換えられなくする。
+          readOnly={sendState.status === "sending"}
+          onChange={(event) => setText(event.target.value)}
+          onKeyDown={(event) => {
+            // 日本語入力の変換を確定する Enter で送らない。
+            if (
+              event.key === "Enter" &&
+              (event.nativeEvent.isComposing || event.nativeEvent.keyCode === 229)
+            ) {
+              event.preventDefault();
+            }
+          }}
+        />
+        <button
+          type="submit"
+          className="reply-button"
+          disabled={text.trim() === "" || sendState.status === "sending"}
+        >
+          返信
+        </button>
+      </form>
+      {/* スクリーンリーダーが送信の結果を読み上げるよう、状態の領域は送る前から置いておく。 */}
+      <p
+        className="reply-status"
+        role="status"
+        data-testid="reply-status"
+        data-status={sendState.status}
+        hidden={sendState.status === "idle"}
+      >
+        {sendState.status === "sending" && "送信中"}
+        {sendState.status === "sent" && "届きました"}
+        {sendState.status === "failed" && `届きませんでした (${sendState.reason})`}
+      </p>
+    </div>
   );
 }
 

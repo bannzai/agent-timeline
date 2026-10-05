@@ -10,6 +10,7 @@
   --thread-line: #cfd9de;
   --accent: #1d9bf0;
   --accent-hover: rgba(29, 155, 240, 0.1);
+  --danger: #f4212e;
   --tool-background: #f7f9f9;
   --claude-code: #d97757;
   --codex: #3a3f45;
@@ -420,6 +421,81 @@ button.tool-call:hover {
 
 .thread-post-with-reply .post-main {
   padding-bottom: 12px;
+}
+
+/* 返信欄: X のポストの詳細画面の返信欄と同じく、枠の無い入力と丸いボタンを並べる。 */
+.reply-composer {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+}
+
+.reply-form {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+
+.reply-input {
+  flex: 1;
+  min-width: 0;
+  padding: 8px 0;
+  border: none;
+  outline: none;
+  background: none;
+  color: var(--text-primary);
+  font: inherit;
+  font-size: 20px;
+  line-height: 24px;
+}
+
+/* 枠の無い入力のため、キーボードで移った時の目印を下線で出す。 */
+.reply-input:focus-visible {
+  box-shadow: 0 2px 0 var(--accent);
+}
+
+.reply-input::placeholder {
+  color: var(--text-secondary);
+}
+
+.reply-button {
+  flex-shrink: 0;
+  padding: 8px 16px;
+  border: none;
+  border-radius: 9999px;
+  background: var(--text-primary);
+  color: var(--background);
+  font-weight: 700;
+  cursor: pointer;
+}
+
+.reply-button:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.reply-status,
+.reply-unavailable {
+  margin: 0;
+  color: var(--text-secondary);
+  font-size: 13px;
+  line-height: 16px;
+}
+
+.reply-status {
+  margin-top: 8px;
+}
+
+.reply-status[data-status="sent"] {
+  color: var(--accent);
+}
+
+.reply-status[data-status="failed"] {
+  color: var(--danger);
+}
+
+.reply-unavailable {
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
 }
 
 /* スレッドの「他 x 件」。上下の発言の線を点線でつなぎ、間に畳んだ発言があることを示す。 */

@@ -39,6 +39,10 @@ export interface TimelinePage {
   nextCursor: string | null;
 }
 
+/** セッションへ返信できるか。できる時は送り先の tmux の pane の ID、できない時は画面に 1 行で出す理由を持つ。 */
+export type ReplyTarget =
+  { available: true; paneId: string } | { available: false; reason: string };
+
 /** 一覧の API (`/api/posts`) の limit の上限。画面が一度に描く件数として十分で、1 回の応答が大きくなりすぎない値にした。 */
 export const timelineMaxLimit = 200;
 

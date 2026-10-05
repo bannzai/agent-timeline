@@ -1,6 +1,7 @@
 import type { AddressInfo } from "node:net";
 import { startServer } from "./server.js";
 import { logRootsFromEnv } from "./timeline.js";
+import { replyCommandsFromEnv } from "./tmux.js";
 import { usageLogDirectoryFromEnv } from "./usage-log.js";
 
 const server = await startServer({
@@ -8,5 +9,6 @@ const server = await startServer({
   port: Number(process.env.AGENT_TIMELINE_PORT ?? 7878),
   logRoots: logRootsFromEnv(process.env),
   usageLogDirectory: usageLogDirectoryFromEnv(process.env),
+  replyCommands: replyCommandsFromEnv(process.env),
 });
 console.log(`agent-timeline: http://127.0.0.1:${(server.address() as AddressInfo).port}`);

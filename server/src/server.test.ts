@@ -6,6 +6,7 @@ import path from "node:path";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { startServer } from "./server.js";
 import { logRootsFromEnv } from "./timeline.js";
+import { replyCommandsFromEnv } from "./tmux.js";
 
 /** テストが起動したサーバー。テストごとに閉じる。 */
 const runningServers: ServerType[] = [];
@@ -24,11 +25,12 @@ function makeTemporaryDirectory(): Promise<string> {
 
 /** サーバーを空いているポートで起動し、`/api/health` の応答の状態コードを返す。 */
 async function startServerAndRequestHealth(usageLogDirectory: string): Promise<number> {
-  // vitest.config.ts が、ログのルートの環境変数を fixtures/ の合成セッションに向けている。
+  // vitest.config.ts が、ログのルートの環境変数を fixtures/ の合成セッションに、tmux と ps を偽のコマンドに向けている。
   const server = await startServer({
     port: 0,
     logRoots: logRootsFromEnv(process.env),
     usageLogDirectory,
+    replyCommands: replyCommandsFromEnv(process.env),
   });
   runningServers.push(server);
   const response = await fetch(

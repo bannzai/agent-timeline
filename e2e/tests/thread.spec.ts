@@ -1,9 +1,18 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
+import { readFile } from "node:fs/promises";
 import type { Post } from "../../server/src/post.js";
+import { fakeTmuxCallsFile } from "../fake-commands.js";
 
-/** fixture の Claude Code のセッションのうち、ツール呼び出しとその結果を持つもの。 */
+/**
+ * fixture の Claude Code のセッションのうち、ツール呼び出しとその結果を持つもの。
+ * 偽の tmux には、このセッションの作業ディレクトリで Claude Code が動いている pane (`%1`) がある (fixtures/fake-commands/README.md)。
+ */
 const claudeCart = "3f2a9c1e-5b7d-4e8a-9c6f-1a2b3c4d5e6f";
 const claudeCartThreadPath = `/sessions/claude-code/${claudeCart}`;
+/** 偽の tmux に、作業ディレクトリでエージェントが動いている pane が無いセッション。 */
+const claudeReadmeThreadPath = "/sessions/claude-code/8d4e2f6a-1c3b-4a5d-8e7f-9a0b1c2d3e4f";
+/** 偽の tmux に、作業ディレクトリで Codex が動いている pane が 2 つあるセッション。 */
+const codexUnitThreadPath = "/sessions/codex/0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 /** claudeCart のセッションの agent の返答。タイムラインでこの投稿を押してスレッドへ移る。 */
 const claudeCartReplyText = "合計の計算を確認します";
 
@@ -126,4 +135,52 @@ test("ツール呼び出しを開くと入力と結果の要約を表示する",
   );
   await expect(page.getByTestId("tool-result")).toHaveText("export function addItem() {}");
   await page.screenshot({ path: testInfo.outputPath("thread-tool-expanded.png"), fullPage: true });
+});
+
+test("返信できるセッションでは、返信欄から送ると届いた表示になり、本文がその pane へ送られる", async ({
+  page,
+}, testInfo) => {
+  const replyText = "合計のテストも足して";
+  await page.goto(claudeCartThreadPath);
+
+  const replyForm = page.getByTestId("reply-form");
+  const replyInput = replyForm.getByRole("textbox", { name: "返信" });
+  await replyInput.fill(replyText);
+  await replyForm.getByRole("button", { name: "返信", exact: true }).click();
+
+  const replyStatus = page.getByTestId("reply-status");
+  await expect(replyStatus).toHaveAttribute("data-status", "sent");
+  await expect(replyStatus).toHaveText("届きました");
+  await expect(replyInput).toHaveValue("");
+  await page.screenshot({ path: testInfo.outputPath("thread-reply-sent.png"), fullPage: true });
+
+  const sendKeysCalls = (await readFile(fakeTmuxCallsFile, "utf8"))
+    .split("\n")
+    .filter((line) => line !== "")
+    .map((line) => JSON.parse(line) as string[])
+    .filter((args) => args[0] === "send-keys");
+  expect(sendKeysCalls.slice(-2)).toEqual([
+    ["send-keys", "-t", "%1", "-l", "--", replyText],
+    ["send-keys", "-t", "%1", "Enter"],
+  ]);
+});
+
+test("返信できないセッションでは、返信欄を出さず理由を表示する", async ({ page }, testInfo) => {
+  await page.goto(claudeReadmeThreadPath);
+  await expect(page.getByTestId("thread-post").first()).toBeVisible();
+  await expect(page.getByTestId("reply-unavailable")).toHaveText(
+    "このセッションが動いている tmux の pane が見つかりません",
+  );
+  await expect(page.getByTestId("reply-form")).toHaveCount(0);
+  await page.screenshot({
+    path: testInfo.outputPath("thread-reply-unavailable.png"),
+    fullPage: true,
+  });
+
+  await page.goto(codexUnitThreadPath);
+  await expect(page.getByTestId("thread-post").first()).toBeVisible();
+  await expect(page.getByTestId("reply-unavailable")).toHaveText(
+    "同じディレクトリで同じ種類のエージェントが複数動いているため送り先を決められません",
+  );
+  await expect(page.getByTestId("reply-form")).toHaveCount(0);
 });

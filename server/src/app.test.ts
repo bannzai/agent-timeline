@@ -1,11 +1,20 @@
+import os from "node:os";
+import path from "node:path";
 import { describe, expect, it } from "vitest";
 import { createApp } from "./app.js";
 import type { Post, PostSession, TimelinePage } from "./post.js";
 import type { Project } from "./project.js";
 import { logRootsFromEnv } from "./timeline.js";
+import { replyCommandsFromEnv } from "./tmux.js";
 
-// vitest.config.ts が、ログのルートの環境変数を fixtures/ の合成セッションに向けている。
-const app = createApp(logRootsFromEnv(process.env));
+// 一覧とスレッドの API は利用記録を書かないが、実際のホームディレクトリを渡さないため、一時ディレクトリにする。
+const usageLogDirectory = path.join(os.tmpdir(), "agent-timeline-app-test");
+// vitest.config.ts が、ログのルートの環境変数を fixtures/ の合成セッションに、tmux と ps を偽のコマンドに向けている。
+const app = createApp({
+  logRoots: logRootsFromEnv(process.env),
+  usageLogDirectory,
+  replyCommands: replyCommandsFromEnv(process.env),
+});
 
 const claudeCart = "3f2a9c1e-5b7d-4e8a-9c6f-1a2b3c4d5e6f";
 const claudeReadme = "8d4e2f6a-1c3b-4a5d-8e7f-9a0b1c2d3e4f";
@@ -196,8 +205,12 @@ describe("GET /api/posts", () => {
   it("ログのルートが空のディレクトリの時は、空の一覧を返す", async () => {
     // fixtures/empty は、ログのファイルを持たないディレクトリ (git に残すための .gitkeep だけを持つ)。
     const response = await createApp({
-      claudeCodeProjectsDirectory: "fixtures/empty",
-      codexSessionsDirectory: "fixtures/empty",
+      logRoots: {
+        claudeCodeProjectsDirectory: "fixtures/empty",
+        codexSessionsDirectory: "fixtures/empty",
+      },
+      usageLogDirectory,
+      replyCommands: replyCommandsFromEnv(process.env),
     }).request("/api/posts");
 
     expect(response.status).toBe(200);
