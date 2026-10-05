@@ -99,6 +99,19 @@ describe("createLogWatcher", () => {
     );
   });
 
+  it("見張っているルートが消えて作り直されたら、そのセッションを知らせる", async () => {
+    const listener = vi.fn<LogChangeListener>();
+    subscribe(listener);
+
+    await rm(logRoots.codexSessionsDirectory, { recursive: true });
+    await waitForNotifyIntervals();
+    await writeCodexNewSessionLog();
+
+    await vi.waitFor(() =>
+      expect(listener).toHaveBeenCalledWith([{ agent: "codex", sessionId: codexNewSession }]),
+    );
+  });
+
   it("ログが変わらない間は知らせない", async () => {
     const listener = vi.fn<LogChangeListener>();
     subscribe(listener);

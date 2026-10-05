@@ -1,4 +1,4 @@
-import { type FSWatcher, watch } from "node:fs";
+import { existsSync, type FSWatcher, watch } from "node:fs";
 import { stat } from "node:fs/promises";
 import { claudeCodeSessionLogFileAt, listClaudeCodeSessionLogFiles } from "./claude-code-log.js";
 import { codexSessionLogFileAt, listCodexSessionLogFiles } from "./codex-log.js";
@@ -105,7 +105,16 @@ export function createLogWatcher(logRoots: LogRoots, notifyIntervalMs: number): 
         const rootWatcher = watch(
           watchedLogRoot.directory,
           { recursive: true },
-          (_eventType, relativePath) => {
+          (eventType, relativePath) => {
+            // Linux の Node は、ルート自身が消えると相対パスが空の rename を送り、それより後はルートを見張らない。
+            // ルートが消えても error が届くとは限らないため、rename の時はルートが残っているかも見る。
+            if (
+              relativePath === "" ||
+              (eventType === "rename" && !existsSync(watchedLogRoot.directory))
+            ) {
+              unwatchLogRoot(watchedLogRoot, rootWatcher);
+              return;
+            }
             const sessionLogFile =
               relativePath === null
                 ? null
@@ -115,12 +124,7 @@ export function createLogWatcher(logRoots: LogRoots, notifyIntervalMs: number): 
             }
           },
         );
-        // ルートが消えた時などに届く。見張りを閉じ、ルートが無い時と同じようにやり直す。
-        rootWatcher.on("error", () => {
-          rootWatcher.close();
-          rootWatchers.delete(watchedLogRoot);
-          scheduleRetry();
-        });
+        rootWatcher.on("error", () => unwatchLogRoot(watchedLogRoot, rootWatcher));
         rootWatchers.set(watchedLogRoot, rootWatcher);
         if (isRetry) {
           void addExistingLogFiles(watchedLogRoot, rootWatcher);
@@ -129,6 +133,19 @@ export function createLogWatcher(logRoots: LogRoots, notifyIntervalMs: number): 
         scheduleRetry();
       }
     }
+  }
+
+  /**
+   * ルートが消えた時などに、watchedLogRoot の見張り rootWatcher を閉じ、ルートが無い時と同じように見張りを始め直す。
+   * rootWatcher が既に閉じられていれば何もしない。
+   */
+  function unwatchLogRoot(watchedLogRoot: WatchedLogRoot, rootWatcher: FSWatcher): void {
+    if (rootWatchers.get(watchedLogRoot) !== rootWatcher) {
+      return;
+    }
+    rootWatcher.close();
+    rootWatchers.delete(watchedLogRoot);
+    scheduleRetry();
   }
 
   /** watchedLogRoot の今あるログのファイルを、次に知らせる時に見るファイルに加える。読む間に rootWatcher が閉じられたら加えない。 */
