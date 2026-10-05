@@ -4,6 +4,7 @@ import { projectName } from "./format";
 import { useLogChanges } from "./log-changes";
 import {
   AgentAvatar,
+  BackHeader,
   HumanContext,
   PostHeader,
   PostText,
@@ -106,19 +107,11 @@ export function Thread({
   const now = new Date();
   return (
     <section aria-label="スレッド">
-      <header className="column-header column-header-with-back">
-        <button type="button" className="back-button" aria-label="戻る" onClick={onBack}>
-          <svg viewBox="0 0 24 24" className="icon" aria-hidden="true">
-            <path d="M7.4 11H20v2H7.4l5.3 5.3-1.4 1.4L3.6 12l7.7-7.7 1.4 1.4L7.4 11Z" />
-          </svg>
-        </button>
-        <div>
-          <h1 className="column-title">スレッド</h1>
-          {firstPost !== undefined && (
-            <div className="column-subtitle">{projectName(firstPost.session)}</div>
-          )}
-        </div>
-      </header>
+      <BackHeader
+        title="スレッド"
+        subtitle={firstPost === undefined ? null : projectName(firstPost.session)}
+        onBack={onBack}
+      />
       {threadState.status === "loading" && <Spinner />}
       {threadState.status === "not-found" && (
         <div className="empty" data-testid="thread-not-found">

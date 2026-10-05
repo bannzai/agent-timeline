@@ -1,4 +1,5 @@
 import type { PostSession } from "../../server/src/post.js";
+import { checkoutOfDirectory } from "../../server/src/project.js";
 
 // 省略する本文の文字数の上限。X が 1 つのポストに書ける文字数 (280) に合わせ、タイムラインの 1 投稿の長さを X と同じくらいにする。
 const collapsedTextMaxLength = 280;
@@ -10,9 +11,31 @@ const minuteMilliseconds = 60 * secondMilliseconds;
 const hourMilliseconds = 60 * minuteMilliseconds;
 const dayMilliseconds = 24 * hourMilliseconds;
 
-/** 投稿者の名前に使う、セッションのプロジェクトの名前 (作業ディレクトリの最後の名前)。 */
+/** 投稿者の名前に使う、セッションのプロジェクトの名前。worktree で動いたセッションも、worktree ではなくプロジェクトの名前を返す。 */
 export function projectName(session: PostSession): string {
-  return session.projectDirectory?.split("/").filter(Boolean).at(-1) ?? "プロジェクト不明";
+  return checkoutOfDirectory(session.projectDirectory)?.projectName ?? "プロジェクト不明";
+}
+
+/**
+ * プロジェクトのアイコンに出す頭文字。`-`・`_`・`.`・空白で区切った名前は最初の 2 語の頭文字 (`acme-shop` は `AS`)、
+ * 区切りの無い名前は先頭の 2 文字 (`castle` は `CA`) を大文字で返す。
+ */
+export function projectInitials(name: string): string {
+  const words = name.split(/[-_.\s]+/).filter((word) => word !== "");
+  const initials =
+    words.length >= 2
+      ? words.slice(0, 2).map((word) => Array.from(word)[0])
+      : Array.from(name).slice(0, 2);
+  return initials.join("").toUpperCase();
+}
+
+/** プロジェクトのアイコンの色相 (0〜359)。同じ名前には毎回同じ色を返し、並んだプロジェクトを色でも見分けられるようにする。 */
+export function projectHue(name: string): number {
+  // 31 は文字列の hash (Java の String.hashCode など) で広く使われる係数。
+  return Array.from(name).reduce(
+    (hue, character) => (hue * 31 + (character.codePointAt(0) ?? 0)) % 360,
+    0,
+  );
 }
 
 /** agent の種類の表示名。 */

@@ -1,5 +1,6 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
+import { findInLogLines } from "./log-file.js";
 import {
   contentItemText,
   isRecord,
@@ -9,6 +10,7 @@ import {
   postId,
   postTimestamp,
   type SessionLogFile,
+  type SessionStart,
   toolCallText,
   toolResultText,
 } from "./post.js";
@@ -44,6 +46,24 @@ export async function listCodexSessionLogFiles(
       sessionId: codexSessionId(path.basename(relativePath)),
       path: path.join(sessionsDirectory, relativePath),
     }));
+}
+
+/** ログの行が session_meta なら、セッションを始めた時の作業ディレクトリとブランチを返す。session_meta でない行は null を返す。 */
+function codexSessionStart(entry: unknown): SessionStart | null {
+  if (!isRecord(entry) || entry.type !== "session_meta" || !isRecord(entry.payload)) {
+    return null;
+  }
+  const payload = entry.payload;
+  return {
+    projectDirectory: typeof payload.cwd === "string" ? payload.cwd : null,
+    gitBranch:
+      isRecord(payload.git) && typeof payload.git.branch === "string" ? payload.git.branch : null,
+  };
+}
+
+/** セッションを始めた時の作業ディレクトリとブランチを、ログの先頭の session_meta から読む。session_meta が無ければ null を返す。 */
+export function readCodexSessionStart(logPath: string): Promise<SessionStart | null> {
+  return findInLogLines(logPath, codexSessionStart);
 }
 
 /**
@@ -83,13 +103,10 @@ export function parseCodexSessionLog(sessionId: string, logText: string): Post[]
       return;
     }
     const payload = entry.payload;
-    if (entry.type === "session_meta") {
-      if (typeof payload.cwd === "string") {
-        projectDirectory = payload.cwd;
-      }
-      if (isRecord(payload.git) && typeof payload.git.branch === "string") {
-        gitBranch = payload.git.branch;
-      }
+    const sessionStart = codexSessionStart(entry);
+    if (sessionStart !== null) {
+      projectDirectory = sessionStart.projectDirectory ?? projectDirectory;
+      gitBranch = sessionStart.gitBranch ?? gitBranch;
       return;
     }
     // event_msg・reasoning などは投稿にしない。

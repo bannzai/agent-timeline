@@ -4,9 +4,49 @@ import {
   absoluteTimeText,
   agentLabel,
   collapsedText,
+  projectHue,
+  projectInitials,
   projectName,
   relativeTimeText,
 } from "./format";
+
+/** 戻るボタンを持つ列の見出し。subtitle は題名の下に小さく出す文で、無ければ出さない。 */
+export function BackHeader({
+  title,
+  subtitle,
+  onBack,
+}: {
+  title: string;
+  subtitle: string | null;
+  onBack: () => void;
+}) {
+  return (
+    <header className="column-header column-header-with-back">
+      <button type="button" className="back-button" aria-label="戻る" onClick={onBack}>
+        <svg viewBox="0 0 24 24" className="icon" aria-hidden="true">
+          <path d="M7.4 11H20v2H7.4l5.3 5.3-1.4 1.4L3.6 12l7.7-7.7 1.4 1.4L7.4 11Z" />
+        </svg>
+      </button>
+      <div>
+        <h1 className="column-title">{title}</h1>
+        {subtitle !== null && <div className="column-subtitle">{subtitle}</div>}
+      </div>
+    </header>
+  );
+}
+
+/** プロジェクトのアイコン。名前の頭文字を、名前から決めた色の丸に出す。 */
+export function ProjectAvatar({ projectName: name }: { projectName: string }) {
+  return (
+    <div
+      className="project-avatar"
+      style={{ backgroundColor: `hsl(${projectHue(name)} 55% 45%)` }}
+      aria-hidden="true"
+    >
+      {projectInitials(name)}
+    </div>
+  );
+}
 
 /** 投稿者のアイコン。agent の種類ごとに色と文字を変え、どのセッションの agent かを見分けられるようにする。 */
 export function AgentAvatar({ session }: { session: PostSession }) {
