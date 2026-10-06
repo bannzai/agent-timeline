@@ -15,6 +15,7 @@ Claude Code / Codex のセッションを X のタイムライン風に表示す
 - 開発マシンで実行しないもの: `npm ci` / `npm install` (`--package-lock-only` なし)、ビルド、テスト、dev サーバー、Playwright、ローカルのブラウザ (`--cdp` なしの agent-browser)。ファイルの編集・`git`・`gh`・`npm install --package-lock-only` (インストールもビルドもせず依存だけを解決する) は開発マシンで行ってよい
 - ブランチを push して PR を作ると、PR ごとに CI が動く。PR の無いブランチで動かす時: `gh workflow run ci.yml --ref <ブランチ>`
 - CI の手順が検証コマンドになる: `npm ci` → `npm run lint` → `npm run format:check` → `npm run typecheck` → `npm run build` → `npm test` → `npm run test:e2e`
+- ビルドを実行してよいマシン (CI の runner 等) では、引数なしの `make` で `npm run lint` から `npm run test:e2e` までの同じ検証が順に走る (`Makefile` の `verify`)。依存の用意 (`npm ci` と `npx playwright install --with-deps chromium`) は検証ではないため `make` に含めず、先に済ませておく。開発マシンでは実行しない
 - 結果を待って読む: `gh pr checks <PR> --watch`。失敗は `gh run view <run ID> --log-failed`
 - 画面の確認: E2E の job が Playwright の出力 (スクリーンショットを含む) を `e2e-screenshots` artifact として上げる。`gh run download <run ID> -n e2e-screenshots -D ./tmp/e2e-screenshots-<run ID>` で取得し、PNG を Read して画面を判断する
 - 画面の振る舞いを足す時は、`e2e/tests/` の E2E テストでその画面を操作し、`testInfo.outputPath(...)` にスクリーンショットを保存する。そのスクリーンショットが変更の証拠になる
