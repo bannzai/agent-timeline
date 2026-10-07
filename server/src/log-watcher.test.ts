@@ -59,6 +59,19 @@ async function writeCodexNewSessionLog(): Promise<void> {
   );
 }
 
+/**
+ * ログを書き換えてから、listener が知らされたことを確かめる。知らされるまでは書き換えをやり直す。
+ * macOS の fs.watch (FSEvents) は、watch() が返った後に別のスレッドで見張りを始め、始まる前の変化は届かない
+ * (libuv の src/unix/fsevents.c。プロセスで最初の watch() は CoreFoundation の読み込みも伴い、特に遅い)。
+ * 購読の直後の 1 回の書き換えだけでは取りこぼすことがあるため、届くまで書き換える。
+ */
+function mutateUntilNotified(mutate: () => Promise<void>, assertion: () => void): Promise<void> {
+  return vi.waitFor(async () => {
+    await mutate();
+    assertion();
+  });
+}
+
 /** 見張りが変更の通知を何度かまとめ終えるまで待つ。 */
 function waitForNotifyIntervals(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, notifyIntervalMs * 5));
@@ -69,10 +82,10 @@ describe("createLogWatcher", () => {
     const listener = vi.fn<LogChangeListener>();
     subscribe(listener);
 
-    await appendFile(claudeCartLogPath(), "\n{}\n");
-
-    await vi.waitFor(() =>
-      expect(listener).toHaveBeenCalledWith([{ agent: "claude-code", sessionId: claudeCart }]),
+    await mutateUntilNotified(
+      () => appendFile(claudeCartLogPath(), "\n{}\n"),
+      () =>
+        expect(listener).toHaveBeenCalledWith([{ agent: "claude-code", sessionId: claudeCart }]),
     );
   });
 
@@ -80,9 +93,7 @@ describe("createLogWatcher", () => {
     const listener = vi.fn<LogChangeListener>();
     subscribe(listener);
 
-    await writeCodexNewSessionLog();
-
-    await vi.waitFor(() =>
+    await mutateUntilNotified(writeCodexNewSessionLog, () =>
       expect(listener).toHaveBeenCalledWith([{ agent: "codex", sessionId: codexNewSession }]),
     );
   });
@@ -146,9 +157,10 @@ describe("createLogWatcher", () => {
     unsubscribers.push(watcher.subscribe(activeListener));
     unsubscribe();
 
-    await appendFile(claudeCartLogPath(), "\n{}\n");
-
-    await vi.waitFor(() => expect(activeListener).toHaveBeenCalled());
+    await mutateUntilNotified(
+      () => appendFile(claudeCartLogPath(), "\n{}\n"),
+      () => expect(activeListener).toHaveBeenCalled(),
+    );
     expect(stoppedListener).not.toHaveBeenCalled();
   });
 
@@ -158,10 +170,10 @@ describe("createLogWatcher", () => {
     const listener = vi.fn<LogChangeListener>();
     unsubscribers.push(watcher.subscribe(listener));
 
-    await appendFile(claudeCartLogPath(), "\n{}\n");
-
-    await vi.waitFor(() =>
-      expect(listener).toHaveBeenCalledWith([{ agent: "claude-code", sessionId: claudeCart }]),
+    await mutateUntilNotified(
+      () => appendFile(claudeCartLogPath(), "\n{}\n"),
+      () =>
+        expect(listener).toHaveBeenCalledWith([{ agent: "claude-code", sessionId: claudeCart }]),
     );
   });
 });
