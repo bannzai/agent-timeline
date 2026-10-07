@@ -48,13 +48,15 @@ async function subscribe(listener: Mock<LogChangeListener>): Promise<void> {
  * macOS の fs.watch (FSEvents) は、watch() が返った後に別のスレッドで見張りを始める (libuv の src/unix/fsevents.c)。
  * 始まる前の書き換えは届かず (プロセスで最初の watch() は CoreFoundation の読み込みも伴い、特に遅い)、
  * 逆に見張りを始める直前の変化 (beforeEach での fixtures の写し) が見張りを始めた後に届くことがある。
- * そのため、claudeCart のログに知らされるまで追記して見張りが動いていることを確かめ (FSEvents は変化を起きた順に
- * 届けるため、その時点で写しの変化は届き終わっている)、進行中の知らせが無くなるまで待ってから記録を消す。
+ * そのため、claudeCart のログに追記して claudeCart が知らされるまで繰り返し、Claude Code のルートの見張りが動いている
+ * ことを確かめ (FSEvents は変化を起きた順に届けるため、その時点で同じルートの写しの変化は届き終わっている)、
+ * 進行中の知らせが無くなるまで待ってから記録を消す。Codex のルートは別の見張りで、ここでは動き出したことを確かめない。
+ * Codex のルートに書くテストは、知らされるまで書き直す。
  */
 async function settle(listener: Mock<LogChangeListener>): Promise<void> {
   await vi.waitFor(async () => {
     await appendFile(claudeCartLogPath(), "\n{}\n");
-    expect(listener).toHaveBeenCalled();
+    expect(listener).toHaveBeenCalledWith([{ agent: "claude-code", sessionId: claudeCart }]);
   });
   await waitForNotifyIntervals();
   listener.mockClear();
@@ -100,11 +102,11 @@ describe("createLogWatcher", () => {
     const listener = vi.fn<LogChangeListener>();
     await subscribe(listener);
 
-    await writeCodexNewSessionLog();
-
-    await vi.waitFor(() =>
-      expect(listener).toHaveBeenCalledWith([{ agent: "codex", sessionId: codexNewSession }]),
-    );
+    // Codex のルートの見張りが動き出す前の書き込みは届かないため、知らされるまで書き直す (settle のコメント)。
+    await vi.waitFor(async () => {
+      await writeCodexNewSessionLog();
+      expect(listener).toHaveBeenCalledWith([{ agent: "codex", sessionId: codexNewSession }]);
+    });
   });
 
   it("購読を始めた時に無かったルートが現れたら、そのセッションを知らせる", async () => {
