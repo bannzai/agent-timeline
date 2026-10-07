@@ -10,7 +10,10 @@ export type LogChangeListener = (changedSessions: SessionsChangedEvent["sessions
 
 /** ログのルートの配下の、セッションのログのファイルの追記と新しいファイルを見張る。 */
 export interface LogWatcher {
-  /** listener の購読を始める。見張りを始めた後で返り、それより後の変化を listener に知らせる。返す値は、購読をやめる関数。 */
+  /**
+   * listener の購読を始める。見張りを始めた後で返り、それより後の変化を listener に知らせる。返す値は、購読をやめる関数。
+   * macOS の fs.watch (FSEvents) は返った後に別のスレッドで見張りを始めるため、返った直後の変化は届かないことがある。
+   */
   subscribe(listener: LogChangeListener): () => void;
 }
 

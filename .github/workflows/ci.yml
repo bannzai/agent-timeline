@@ -15,7 +15,12 @@ concurrency:
 
 jobs:
   build-test:
-    runs-on: ubuntu-latest
+    # 開発マシンは macOS で、fs.watch の実装 (FSEvents) が Linux (inotify) と異なるため、両方で単体テストを走らせる。
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
