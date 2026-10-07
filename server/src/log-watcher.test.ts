@@ -1,7 +1,7 @@
 import { appendFile, cp, mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, type Mock, vi } from "vitest";
 import { createLogWatcher, type LogChangeListener } from "./log-watcher.js";
 import type { LogRoots } from "./timeline.js";
 
@@ -38,6 +38,17 @@ afterEach(async () => {
 /** 見張りを作って listener の購読を始める。 */
 function subscribe(listener: LogChangeListener): void {
   unsubscribers.push(createLogWatcher(logRoots, notifyIntervalMs).subscribe(listener));
+}
+
+/**
+ * 購読を始め、見張りが落ち着くのを待ってから listener の呼び出しの記録を消す。知らせないことを確かめるテストで使う。
+ * macOS の fs.watch (FSEvents) は、見張りを始める直前の変化 (beforeEach での fixtures の写し) を見張りを始めた後に
+ * 届けることがあり、購読の直後はログが変わらなくても知らされることがあるため。
+ */
+async function subscribeAndSettle(listener: Mock<LogChangeListener>): Promise<void> {
+  subscribe(listener);
+  await waitForNotifyIntervals();
+  listener.mockClear();
 }
 
 /** 一時ディレクトリの claudeCart のログのファイル。 */
@@ -125,7 +136,7 @@ describe("createLogWatcher", () => {
 
   it("ログが変わらない間は知らせない", async () => {
     const listener = vi.fn<LogChangeListener>();
-    subscribe(listener);
+    await subscribeAndSettle(listener);
 
     await waitForNotifyIntervals();
 
@@ -141,7 +152,7 @@ describe("createLogWatcher", () => {
     );
     await mkdir(subagentsDirectory, { recursive: true });
     const listener = vi.fn<LogChangeListener>();
-    subscribe(listener);
+    await subscribeAndSettle(listener);
 
     await writeFile(path.join(subagentsDirectory, "agent-1.jsonl"), "{}\n");
     await waitForNotifyIntervals();
