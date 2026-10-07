@@ -61,12 +61,13 @@ async function settle(listener: Mock<LogChangeListener>): Promise<void> {
     { path: claudeCartLogPath(), agent: "claude-code", sessionId: claudeCart },
     { path: codexExistingLogPath(), agent: "codex", sessionId: codexExisting },
   ].filter(({ path: logPath }) => existsSync(logPath));
-  await vi.waitFor(async () => {
-    for (const { path: logPath, agent, sessionId } of logPaths) {
+  // 追記が notifyIntervalMs 以内に続くと 1 つの知らせにまとめられるため、知らせに含まれることを確かめる。
+  for (const { path: logPath, agent, sessionId } of logPaths) {
+    await vi.waitFor(async () => {
       await appendFile(logPath, "\n{}\n");
-      expect(listener).toHaveBeenCalledWith([{ agent, sessionId }]);
-    }
-  });
+      expect(listener).toHaveBeenCalledWith(expect.arrayContaining([{ agent, sessionId }]));
+    });
+  }
   await waitForNotifyIntervals();
   listener.mockClear();
 }
