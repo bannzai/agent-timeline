@@ -35,18 +35,27 @@ afterEach(async () => {
   await rm(temporaryDirectory, { recursive: true, force: true });
 });
 
-/** 見張りを作って listener の購読を始める。 */
-function subscribe(listener: LogChangeListener): void {
+/** 見張りを作って listener の購読を始め、見張りが落ち着くまで待つ。 */
+async function subscribe(listener: Mock<LogChangeListener>): Promise<void> {
   unsubscribers.push(createLogWatcher(logRoots, notifyIntervalMs).subscribe(listener));
+  await settle(listener);
 }
 
 /**
- * 購読を始め、見張りが落ち着くのを待ってから listener の呼び出しの記録を消す。知らせないことを確かめるテストで使う。
- * macOS の fs.watch (FSEvents) は、見張りを始める直前の変化 (beforeEach での fixtures の写し) を見張りを始めた後に
- * 届けることがあり、購読の直後はログが変わらなくても知らされることがあるため。
+ * 購読を始めた後、見張りが変化を届けられる状態になり、購読より前の変化が届き終わるまで待ってから、
+ * listener の呼び出しの記録を消す。この後のテストの書き換えだけが listener に届く。
+ *
+ * macOS の fs.watch (FSEvents) は、watch() が返った後に別のスレッドで見張りを始める (libuv の src/unix/fsevents.c)。
+ * 始まる前の書き換えは届かず (プロセスで最初の watch() は CoreFoundation の読み込みも伴い、特に遅い)、
+ * 逆に見張りを始める直前の変化 (beforeEach での fixtures の写し) が見張りを始めた後に届くことがある。
+ * そのため、claudeCart のログに知らされるまで追記して見張りが動いていることを確かめ (FSEvents は変化を起きた順に
+ * 届けるため、その時点で写しの変化は届き終わっている)、進行中の知らせが無くなるまで待ってから記録を消す。
  */
-async function subscribeAndSettle(listener: Mock<LogChangeListener>): Promise<void> {
-  subscribe(listener);
+async function settle(listener: Mock<LogChangeListener>): Promise<void> {
+  await vi.waitFor(async () => {
+    await appendFile(claudeCartLogPath(), "\n{}\n");
+    expect(listener).toHaveBeenCalled();
+  });
   await waitForNotifyIntervals();
   listener.mockClear();
 }
@@ -70,19 +79,6 @@ async function writeCodexNewSessionLog(): Promise<void> {
   );
 }
 
-/**
- * ログを書き換えてから、listener が知らされたことを確かめる。知らされるまでは書き換えをやり直す。
- * macOS の fs.watch (FSEvents) は、watch() が返った後に別のスレッドで見張りを始め、始まる前の変化は届かない
- * (libuv の src/unix/fsevents.c。プロセスで最初の watch() は CoreFoundation の読み込みも伴い、特に遅い)。
- * 購読の直後の 1 回の書き換えだけでは取りこぼすことがあるため、届くまで書き換える。
- */
-function mutateUntilNotified(mutate: () => Promise<void>, assertion: () => void): Promise<void> {
-  return vi.waitFor(async () => {
-    await mutate();
-    assertion();
-  });
-}
-
 /** 見張りが変更の通知を何度かまとめ終えるまで待つ。 */
 function waitForNotifyIntervals(): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, notifyIntervalMs * 5));
@@ -91,20 +87,22 @@ function waitForNotifyIntervals(): Promise<void> {
 describe("createLogWatcher", () => {
   it("ログが追記されたセッションを知らせる", async () => {
     const listener = vi.fn<LogChangeListener>();
-    subscribe(listener);
+    await subscribe(listener);
 
-    await mutateUntilNotified(
-      () => appendFile(claudeCartLogPath(), "\n{}\n"),
-      () =>
-        expect(listener).toHaveBeenCalledWith([{ agent: "claude-code", sessionId: claudeCart }]),
+    await appendFile(claudeCartLogPath(), "\n{}\n");
+
+    await vi.waitFor(() =>
+      expect(listener).toHaveBeenCalledWith([{ agent: "claude-code", sessionId: claudeCart }]),
     );
   });
 
   it("新しく現れたセッションを知らせる", async () => {
     const listener = vi.fn<LogChangeListener>();
-    subscribe(listener);
+    await subscribe(listener);
 
-    await mutateUntilNotified(writeCodexNewSessionLog, () =>
+    await writeCodexNewSessionLog();
+
+    await vi.waitFor(() =>
       expect(listener).toHaveBeenCalledWith([{ agent: "codex", sessionId: codexNewSession }]),
     );
   });
@@ -112,7 +110,7 @@ describe("createLogWatcher", () => {
   it("購読を始めた時に無かったルートが現れたら、そのセッションを知らせる", async () => {
     await rm(logRoots.codexSessionsDirectory, { recursive: true });
     const listener = vi.fn<LogChangeListener>();
-    subscribe(listener);
+    await subscribe(listener);
 
     await writeCodexNewSessionLog();
 
@@ -123,7 +121,7 @@ describe("createLogWatcher", () => {
 
   it("見張っているルートが消えて作り直されたら、そのセッションを知らせる", async () => {
     const listener = vi.fn<LogChangeListener>();
-    subscribe(listener);
+    await subscribe(listener);
 
     await rm(logRoots.codexSessionsDirectory, { recursive: true });
     await waitForNotifyIntervals();
@@ -136,7 +134,7 @@ describe("createLogWatcher", () => {
 
   it("ログが変わらない間は知らせない", async () => {
     const listener = vi.fn<LogChangeListener>();
-    await subscribeAndSettle(listener);
+    await subscribe(listener);
 
     await waitForNotifyIntervals();
 
@@ -152,7 +150,7 @@ describe("createLogWatcher", () => {
     );
     await mkdir(subagentsDirectory, { recursive: true });
     const listener = vi.fn<LogChangeListener>();
-    await subscribeAndSettle(listener);
+    await subscribe(listener);
 
     await writeFile(path.join(subagentsDirectory, "agent-1.jsonl"), "{}\n");
     await waitForNotifyIntervals();
@@ -167,11 +165,11 @@ describe("createLogWatcher", () => {
     const unsubscribe = watcher.subscribe(stoppedListener);
     unsubscribers.push(watcher.subscribe(activeListener));
     unsubscribe();
+    await settle(activeListener);
 
-    await mutateUntilNotified(
-      () => appendFile(claudeCartLogPath(), "\n{}\n"),
-      () => expect(activeListener).toHaveBeenCalled(),
-    );
+    await appendFile(claudeCartLogPath(), "\n{}\n");
+
+    await vi.waitFor(() => expect(activeListener).toHaveBeenCalled());
     expect(stoppedListener).not.toHaveBeenCalled();
   });
 
@@ -180,11 +178,12 @@ describe("createLogWatcher", () => {
     watcher.subscribe(vi.fn<LogChangeListener>())();
     const listener = vi.fn<LogChangeListener>();
     unsubscribers.push(watcher.subscribe(listener));
+    await settle(listener);
 
-    await mutateUntilNotified(
-      () => appendFile(claudeCartLogPath(), "\n{}\n"),
-      () =>
-        expect(listener).toHaveBeenCalledWith([{ agent: "claude-code", sessionId: claudeCart }]),
+    await appendFile(claudeCartLogPath(), "\n{}\n");
+
+    await vi.waitFor(() =>
+      expect(listener).toHaveBeenCalledWith([{ agent: "claude-code", sessionId: claudeCart }]),
     );
   });
 });
