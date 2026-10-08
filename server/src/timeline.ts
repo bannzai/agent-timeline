@@ -18,6 +18,7 @@ import {
   compareText,
   parseJson,
   type Post,
+  type PostAuthor,
   type SessionLogFile,
   type SessionStart,
   type TimelinePage,
@@ -122,6 +123,7 @@ async function readSessionCheckout(sessionLogFile: SessionLogFile): Promise<Chec
 /**
  * 全セッションの投稿を新しい順に、cursor より古いものから最大 limit 件返す。
  * filter を渡すと、そのプロジェクトか worktree のセッションの投稿だけを返す。
+ * authors を渡すと、その書き手の投稿だけを返す (ページの件数は、絞った後の投稿で数える)。
  */
 export async function readTimeline(
   logRoots: LogRoots,
@@ -129,7 +131,13 @@ export async function readTimeline(
     limit,
     cursor,
     filter,
-  }: { limit: number; cursor: TimelineCursor | null; filter?: TimelineFilter },
+    authors,
+  }: {
+    limit: number;
+    cursor: TimelineCursor | null;
+    filter?: TimelineFilter;
+    authors?: ReadonlySet<PostAuthor>;
+  },
 ): Promise<TimelinePage> {
   // ファイルの中の投稿の日時は、そのファイルの最終更新の日時を超えない。そこで最終更新が新しい順に読み、
   // 残りのファイルにページへ入る投稿が無いと分かった時点で読むのをやめる。
@@ -152,6 +160,7 @@ export async function readTimeline(
   let collectedPosts: Post[] = [];
   for (const [fileIndex, { sessionLogFile }] of sessionLogFiles.entries()) {
     collectedPosts = [...collectedPosts, ...(await readSessionPosts(sessionLogFile))]
+      .filter((post) => authors === undefined || authors.has(post.author))
       .filter((post) => cursor === null || compareNewestFirst(cursor, post) < 0)
       .sort(compareNewestFirst)
       .slice(0, limit + 1);

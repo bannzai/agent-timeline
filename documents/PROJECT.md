@@ -17,6 +17,27 @@ agent-timeline は、エージェントが既に書いているファイルを�
 
 テストを実行するマシンには本物のログが無いため、2 つのルートディレクトリは環境変数 (`AGENT_TIMELINE_CLAUDE_PROJECTS_DIR`・`AGENT_TIMELINE_CODEX_SESSIONS_DIR`) で差し替えられるようにする。
 
+### 投稿にしない行
+
+投稿にするのは、人間が agent に向けて書いた指示、agent の返答、agent のツール呼び出しだけにする。各ツールは、人間の行 (`user` / `role: user`) に人間が書いたのではない文も書くため、次の行は投稿にしない。件数は、開発者のマシンの 2026-10-01〜10-08 に更新された Claude Code のログ 1,769 ファイル (`isMeta`・`isSidechain` の行を除く `user` の行) と、2026-09-01 以降の Codex のログ 833 ファイルで数えた (2026-10-08)。人間の指示が 1,347 行だったのに対し、ツールが差し込んだ文の方が多く、除かないとタイムラインが会話にならない。
+
+| エージェント | 行 | 件数 | 扱い |
+| --- | --- | --- | --- |
+| Claude Code | `<task-notification>` で始まる: バックグラウンドの処理の完了通知 | 1,633 | 投稿にしない |
+| Claude Code | `<command-message>` で始まる: skill (`/foo 引数`) の起動。`<command-name>` と `<command-args>` を持ち、展開された SKILL.md の本文は `isMeta` の行 (719 行) に別に書かれる | 490 | 人が打った `/foo 引数` の 1 行の投稿にする |
+| Claude Code | `<command-name>` で始まる: Claude Code が手元で処理するコマンド (`/usage` 1,092・`/login` 25・`/exit` 17・`/model` 17 など)。agent には届かず、出力は `<local-command-stdout>` に書かれる。`/usage` は `claude -p '/usage'` (`entrypoint` が `sdk-cli`) のセッションで、agent の返答が無い | 1,189 | 投稿にしない (skill の起動と見分けるのは行の先頭のタグ。2026-10 の Claude Code 2.1.179〜2.1.294 で、`<command-name>` で始まる行の次は `<local-command-stdout>` かログの末尾で、assistant の行が続いたことは無い) |
+| Claude Code | `<local-command-stdout>` で始まる: 手元で処理するコマンドの出力 | 77 | 投稿にしない |
+| Claude Code | `[Request interrupted by user]`・`[Request interrupted by user for tool use]`: 人が処理を中断した通知 | 60 + 41 | 投稿にしない (中断は人の操作だが、本文が無い) |
+| Claude Code | `<bash-input>`・`<bash-stdout>`・`<bash-stderr>`: 人が `!` で実行したシェルのコマンドと出力 | 37 + 35 (`<bash-stderr>` は `<bash-stdout>` の行の中に 35) | 投稿にしない (agent への指示ではない) |
+| Claude Code | 「Another Claude session sent a message:」で始まる: 別のセッション (teammate・サブエージェント) の報告 (`<teammate-message>` の JSON) の転送 | 59 (ほかに `isMeta` の行に 554) | 投稿にしない。agent の発言としても残さない (報告の本文は相手のセッションのログにあり、この行への agent の返答は assistant の行に残るため) |
+| Claude Code | 本文が `[Image #n]` だけ: 画像の添付の印 | 3 (`[Image #n]` で始まる行は 30 で、残りは文が添えられている) | 投稿にしない。文に添えられている時は印ごと残す |
+| Claude Code | `[SYSTEM NOTIFICATION - NOT USER INPUT]` で始まる通知、`<system-reminder>` だけの行 | 0 (この期間のログには現れなかった。`<system-reminder>` は `<task-notification>` の中に 11 行) | 投稿にしない (issue #31 の指摘に基づく) |
+| Codex | `session_meta` の `source` が `subagent` のセッション: 承認の要否を別のモデルに判定させる guardian (`{"subagent":{"other":"guardian"}}`) と、並列の作業に spawn したスレッド (`{"subagent":{"thread_spawn":...}}`)。guardian の `user` の message は親のセッションの会話の写し (`[1] user: ...` の列。2,904 message) を持つ | 255 + 190 ファイル (833 ファイル中) | セッションごと投稿にしない (Claude Code の `isSidechain` と同じ扱い) |
+| Codex | `user` の message の要素のうち、`<environment_context>`・`# AGENTS.md instructions`・`<skill>`・`<recommended_plugins>`・`<hook_prompt `・`<codex_internal_context `・`<no retained transcript delta entries>` で始まるもの: Codex が指示に差し込む文脈 | 909 + 847 + 200 + 65 + 8 + 5 + 138 | その要素だけ投稿にしない |
+| Codex | `event_msg` の行 (`task_started`・`task_complete`・`turn_aborted` など) | 72 (`turn_aborted`) | 投稿にしない (`response_item` 以外の行は読まない) |
+
+ほかに、Claude Code の `isMeta` (Claude Code が差し込んだ文)・`isSidechain` (サブエージェントの会話)・`isCompactSummary` (会話の圧縮の要約) の行と、Codex の `developer` の message (Codex が agent に渡す指示) も投稿にしない。人間が書いた文は `<div>` や `<pasted_content>` で始まることもあるため、除外は既知の書き出しに限る。
+
 ## 返信の送り先
 
 返信は、セッションが動いている tmux の pane へキー入力として送る。送り先の pane は次の条件でちょうど 1 つに決まる時だけ使い、決まらないセッションのスレッドには返信欄を出さない。
