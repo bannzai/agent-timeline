@@ -18,6 +18,7 @@ import {
 } from "./PostParts";
 import { groupConsecutiveSessionPosts } from "./post-groups";
 import { threadPath } from "./route";
+import { conversationAuthors, useShowToolCalls } from "./show-tool-calls";
 
 // 末尾がこの距離まで近づいたら続きを読み込む。投稿 4〜5 件ぶんの高さで、読み進める手が止まる前に次のページが届く。
 const loadMoreRootMargin = "600px";
@@ -25,21 +26,34 @@ const loadMoreRootMargin = "600px";
 /** 続きの読み込みの状態。error は直前の読み込みに失敗し、もう一度読み込むボタンを出している状態。 */
 type LoadState = "idle" | "loading" | "error";
 
-/** 一覧の API の URL。filter があれば、そのプロジェクトか worktree の投稿に絞る。params は一緒に渡すクエリ。 */
-function postsUrl(filter: TimelineFilter | null, params: Record<string, string>): string {
+/** 一覧の API の条件。 */
+interface PostsQuery {
+  /** あれば、そのプロジェクトか worktree のセッションの投稿に絞る。 */
+  filter: TimelineFilter | null;
+  /** false なら、ツール呼び出しを除いた会話の投稿に絞る。 */
+  showToolCalls: boolean;
+}
+
+/** 一覧の API の URL。params は条件と一緒に渡すクエリ。 */
+function postsUrl(postsQuery: PostsQuery, params: Record<string, string>): string {
   const query = new URLSearchParams(params);
-  if (filter !== null) {
-    query.set("project", filter.projectName);
-    if (filter.worktreeName !== null) {
-      query.set("worktree", filter.worktreeName);
+  if (postsQuery.filter !== null) {
+    query.set("project", postsQuery.filter.projectName);
+    if (postsQuery.filter.worktreeName !== null) {
+      query.set("worktree", postsQuery.filter.worktreeName);
     }
+  }
+  // ツール呼び出しを出さない時はサーバーで除き、ページの件数がツール呼び出しで埋まらないようにする。
+  if (!postsQuery.showToolCalls) {
+    query.set("authors", conversationAuthors);
   }
   return `/api/posts?${query}`;
 }
 
 /**
  * タイムライン。投稿を新しい順に 1 列で並べ、下まで読むと続きを読み込む。filter が null なら全セッションの投稿を、
- * あればそのプロジェクトか worktree のセッションの投稿だけを並べる。filter を替える時は、key を替えて作り直す。
+ * あればそのプロジェクトか worktree のセッションの投稿だけを並べる。ツール呼び出しの投稿は、表示の設定が
+ * ON の時だけ並べる。filter と設定を替える時は、key を替えて作り直す。
  */
 export function Timeline({
   filter,
@@ -48,8 +62,9 @@ export function Timeline({
   filter: TimelineFilter | null;
   onOpenThread: (session: PostSession) => void;
 }) {
-  // 読み込みの関数は作った時の filter を使い続ける。filter は作り直すまで変わらない (上の説明) ため、最初の値を持つ。
-  const filterRef = useRef(filter);
+  const showToolCalls = useShowToolCalls();
+  // 読み込みの関数は作った時の条件を使い続ける。条件は作り直すまで変わらない (上の説明) ため、最初の値を持つ。
+  const postsQueryRef = useRef<PostsQuery>({ filter, showToolCalls });
   const [posts, setPosts] = useState<Post[]>([]);
   // 次に読み込むページのカーソル。undefined は最初のページをまだ読んでいない、null は続きが無いことを表す。
   // 画面の描き分けは state を、読み込みは ref を使う。ref は読み込みが終わった時点で変わるため、
@@ -76,7 +91,7 @@ export function Timeline({
     }
     loadingRef.current = true;
     setLoadState("loading");
-    fetch(postsUrl(filterRef.current, cursor === undefined ? {} : { cursor }))
+    fetch(postsUrl(postsQueryRef.current, cursor === undefined ? {} : { cursor }))
       .then(async (response) => {
         if (!response.ok) {
           throw new Error(`一覧の API が ${response.status} を返した`);
@@ -134,7 +149,7 @@ export function Timeline({
     checkingNewPostsRef.current = true;
     // 一覧の API が 1 回で返せる最も多い件数を読み、知らせの間隔 (約 1 秒) に増えた投稿を取りこぼさないようにする。
     // 1 回の間にこれより多くの投稿が増えると、溢れた分は読み直すまでタイムラインに出ない。
-    fetch(postsUrl(filterRef.current, { limit: String(timelineMaxLimit) }))
+    fetch(postsUrl(postsQueryRef.current, { limit: String(timelineMaxLimit) }))
       .then(async (response) => {
         if (!response.ok) {
           throw new Error(`一覧の API が ${response.status} を返した`);

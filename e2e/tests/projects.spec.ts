@@ -1,5 +1,6 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { TimelinePage } from "../../server/src/post.js";
+import { enableShowToolCalls } from "../show-tool-calls.js";
 
 // fixture の acme-shop のプロジェクトは、本体の checkout (/home/dev/acme-shop) の claudeCart と、
 // worktree (/home/dev/worktrees/dev/acme-shop/fix-tax-rounding) の codexTax の 2 つのセッションを持つ。
@@ -13,6 +14,8 @@ const fixedNow = new Date("2026-10-02T10:31:00.000Z");
 
 test.beforeEach(async ({ page }) => {
   await page.clock.setFixedTime(fixedNow);
+  // ここのテストは、画面の投稿を一覧の API の全投稿 (ツール呼び出しを含む) と比べる。
+  await enableShowToolCalls(page);
 });
 
 /** 要素の列から、属性の値を上から順に返す。 */

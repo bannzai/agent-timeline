@@ -1,8 +1,16 @@
 /** 投稿を書いた agent の種類。 */
 export type AgentKind = "claude-code" | "codex";
 
+/** 投稿の書き手の一覧。一覧の API の `authors` に指定できる値になる。 */
+export const postAuthors = ["human", "agent", "tool"] as const;
+
 /** 投稿の書き手。human は人間の指示、agent は agent の返答、tool は agent のツール呼び出し。 */
-export type PostAuthor = "human" | "agent" | "tool";
+export type PostAuthor = (typeof postAuthors)[number];
+
+/** 文字列が投稿の書き手の値か。 */
+export function isPostAuthor(value: string): value is PostAuthor {
+  return (postAuthors as readonly string[]).includes(value);
+}
 
 /** 投稿がどのセッションのものか。 */
 export interface PostSession {

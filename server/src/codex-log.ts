@@ -63,6 +63,16 @@ export async function listCodexSessionLogFiles(
   );
 }
 
+/**
+ * session_meta の payload が、Codex が自分で始めたサブエージェントのセッションのものか。承認の要否を別のモデルに判定させる
+ * guardian (`source.subagent.other` が `guardian`) と、並列の作業に spawn したスレッド (`source.subagent.thread_spawn`) があり、
+ * どちらも人間との会話ではない (Claude Code の isSidechain と同じ)。guardian の user の message は、親のセッションの
+ * 会話の写し (`[1] user: ...` の列) を持ち、人間の指示として読むと親の会話が二重に並ぶ。2026-09〜10 の Codex 0.156 のログで確認。
+ */
+function isCodexSubagentSessionMeta(payload: Record<string, unknown>): boolean {
+  return isRecord(payload.source) && "subagent" in payload.source;
+}
+
 /** ログの行が session_meta なら、セッションを始めた時の作業ディレクトリとブランチを返す。session_meta でない行は null を返す。 */
 function codexSessionStart(entry: unknown): SessionStart | null {
   if (!isRecord(entry) || entry.type !== "session_meta" || !isRecord(entry.payload)) {
@@ -103,6 +113,7 @@ function isInjectedContext(text: string): boolean {
 /**
  * Codex のセッションのログ (JSONL の全文) を、古い順の投稿にする。
  * 人間の指示・agent の返答・ツール呼び出しだけを投稿にし、読めない行と知らない種類の行は読み飛ばす。
+ * Codex が自分で始めたサブエージェントのセッション (isCodexSubagentSessionMeta) は、人間との会話ではないため投稿を持たない。
  */
 export function parseCodexSessionLog(sessionId: string, logText: string): Post[] {
   const posts: Post[] = [];
@@ -112,21 +123,24 @@ export function parseCodexSessionLog(sessionId: string, logText: string): Post[]
   // ツールの結果の行は、呼び出しの行の call_id を持つ。結果を呼び出しの投稿の toolResult に入れるため、call_id から引く。
   const toolPostsByCallId = new Map<string, Post>();
 
-  logText.split("\n").forEach((line, lineIndex) => {
+  for (const [lineIndex, line] of logText.split("\n").entries()) {
     const entry = parseJson(line);
     if (!isRecord(entry) || !isRecord(entry.payload)) {
-      return;
+      continue;
     }
     const payload = entry.payload;
     const sessionStart = codexSessionStart(entry);
     if (sessionStart !== null) {
+      if (isCodexSubagentSessionMeta(payload)) {
+        return [];
+      }
       projectDirectory = sessionStart.projectDirectory ?? projectDirectory;
       gitBranch = sessionStart.gitBranch ?? gitBranch;
-      return;
+      continue;
     }
-    // event_msg・reasoning などは投稿にしない。
+    // event_msg (task_started・turn_aborted など)・reasoning などは投稿にしない。
     if (entry.type !== "response_item") {
-      return;
+      continue;
     }
     if (payload.type === "custom_tool_call_output" || payload.type === "function_call_output") {
       const toolPost =
@@ -134,11 +148,11 @@ export function parseCodexSessionLog(sessionId: string, logText: string): Post[]
       if (toolPost !== undefined) {
         toolPost.toolResult = toolResultText(payload.output);
       }
-      return;
+      continue;
     }
     const timestamp = postTimestamp(entry.timestamp);
     if (timestamp === null) {
-      return;
+      continue;
     }
     const id = postId("codex", sessionId, lineIndex, 0);
     const session = { agent: "codex" as const, sessionId, projectDirectory, gitBranch };
@@ -146,7 +160,7 @@ export function parseCodexSessionLog(sessionId: string, logText: string): Post[]
     if (payload.type === "message") {
       const author = messageAuthors.get(payload.role);
       if (author === undefined || !Array.isArray(payload.content)) {
-        return;
+        continue;
       }
       const text = payload.content
         .map(contentItemText)
@@ -174,7 +188,7 @@ export function parseCodexSessionLog(sessionId: string, logText: string): Post[]
         }
       }
     }
-  });
+  }
 
   return posts;
 }

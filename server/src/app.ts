@@ -1,7 +1,15 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { createLogWatcher } from "./log-watcher.js";
-import { type AgentKind, isRecord, type SessionsChangedEvent, timelineMaxLimit } from "./post.js";
+import {
+  type AgentKind,
+  isPostAuthor,
+  isRecord,
+  type PostAuthor,
+  postAuthors,
+  type SessionsChangedEvent,
+  timelineMaxLimit,
+} from "./post.js";
 import {
   decodeTimelineCursor,
   type LogRoots,
@@ -67,6 +75,7 @@ export function createApp(options: AppOptions): Hono {
 
   // 全セッションの投稿を新しい順に返す。`limit` は件数の上限、`cursor` は直前の応答の `nextCursor`。
   // `project` を渡すとそのプロジェクトの、さらに `worktree` を渡すとその worktree のセッションの投稿だけを返す。
+  // `authors` (書き手を `,` でつないだもの。例: `human,agent`) を渡すと、その書き手の投稿だけを返す。
   app.get("/api/posts", async (c) => {
     const limitText = c.req.query("limit");
     const limit = limitText === undefined ? timelineDefaultLimit : Number(limitText);
@@ -85,7 +94,13 @@ export function createApp(options: AppOptions): Hono {
     }
     const filter =
       projectName === undefined ? undefined : { projectName, worktreeName: worktreeName ?? null };
-    return c.json(await readTimeline(options.logRoots, { limit, cursor, filter }));
+    const authorsText = c.req.query("authors");
+    const authorValues = authorsText === undefined ? undefined : authorsText.split(",");
+    if (authorValues !== undefined && !authorValues.every(isPostAuthor)) {
+      return c.json({ error: `authors は ${postAuthors.join("・")} を , でつないで指定する` }, 400);
+    }
+    const authors = authorValues === undefined ? undefined : new Set<PostAuthor>(authorValues);
+    return c.json(await readTimeline(options.logRoots, { limit, cursor, filter, authors }));
   });
 
   // ログがあるプロジェクトと、その worktree を最近使った順に返す。

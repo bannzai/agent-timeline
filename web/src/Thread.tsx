@@ -11,6 +11,7 @@ import {
   Spinner,
   ToolCallDetails,
 } from "./PostParts";
+import { useShowToolCalls } from "./show-tool-calls";
 import { expandThreadFold, foldThreadPosts } from "./thread-fold";
 
 /** スレッドの API の読み込みの状態。not-found はセッションが無い (404) ことを表す。 */
@@ -27,7 +28,10 @@ type ReplySendState =
   | { status: "sent" }
   | { status: "failed"; reason: string };
 
-/** 1 つのセッションのスレッド。セッションの発言を新しい順に、返信の連なりとして並べる。 */
+/**
+ * 1 つのセッションのスレッド。セッションの発言を新しい順に、返信の連なりとして並べる。
+ * ツール呼び出しの発言は、表示の設定が ON の時だけ並べる (「他 x 件」の件数もその発言で数える)。
+ */
 export function Thread({
   agent,
   sessionId,
@@ -37,6 +41,7 @@ export function Thread({
   sessionId: string;
   onBack: () => void;
 }) {
+  const showToolCalls = useShowToolCalls();
   const [threadState, setThreadState] = useState<ThreadState>({ status: "loading" });
   // 読み込み中の読み込みを、セッションが替わった時と画面を閉じた時に止めるためのもの。読み込んでいない間は null。
   const loadControllerRef = useRef<AbortController | null>(null);
@@ -111,6 +116,11 @@ export function Thread({
   }, true);
 
   const firstPost = threadState.status === "loaded" ? threadState.posts[0] : undefined;
+  // 画面に並べる発言。返信の送り先はツール呼び出しを含む全ての発言から決まるため、API の応答は絞らずに持つ。
+  const shownPosts =
+    threadState.status === "loaded"
+      ? threadState.posts.filter((post) => showToolCalls || post.author !== "tool")
+      : [];
   // 相対時刻の基準。読み込むたびに描き直すため、描画の時点の時刻を使う。
   const now = new Date();
   return (
@@ -141,9 +151,13 @@ export function Thread({
             {threadState.reply.reason}
           </p>
         ))}
-      {/* key は、セッションが替わった時に前のセッションで開いた「他 x 件」を持ち越さないためのもの。 */}
+      {/* key は、セッションが替わった時とツール呼び出しの表示を替えた時に、前に開いた「他 x 件」を持ち越さないためのもの。 */}
       {threadState.status === "loaded" && (
-        <FoldedThreadPosts key={`${agent}:${sessionId}`} posts={threadState.posts} now={now} />
+        <FoldedThreadPosts
+          key={`${agent}:${sessionId}:${String(showToolCalls)}`}
+          posts={shownPosts}
+          now={now}
+        />
       )}
     </section>
   );

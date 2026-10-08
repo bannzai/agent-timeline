@@ -18,8 +18,12 @@ const app = createApp({
 
 const claudeCart = "3f2a9c1e-5b7d-4e8a-9c6f-1a2b3c4d5e6f";
 const claudeReadme = "8d4e2f6a-1c3b-4a5d-8e7f-9a0b1c2d3e4f";
+/** fixtures/ の Claude Code のセッションのうち、skill の起動と、人間の投稿にならない行だけを持つもの。 */
+const claudeSkill = "b7c5d3e1-2f4a-4b6c-8d9e-0f1a2b3c4d5e";
 const codexUnit = "0199a1b2-c3d4-7e5f-8a9b-0c1d2e3f4a5b";
 const codexTax = "0199b2c3-d4e5-7f6a-9b0c-1d2e3f4a5b6c";
+/** fixtures/ の Codex のセッションのうち、Codex が承認の判定のために自分で始めたサブエージェント (guardian) のもの。 */
+const codexGuardian = "0199c3d4-e5f6-7a7b-8c1d-2e3f4a5b6c7d";
 
 /** fixtures/ の codexUnit のセッションにある、画面で省略される長さの agent の返答。 */
 const codexUnitPlanText = [
@@ -51,7 +55,14 @@ const allPostsNewestFirst = [
   ["codex", codexUnit, "agent", codexUnitPlanText],
   // < で始まる人間の指示は、Codex が差し込む文脈と違って残る。
   ["codex", codexUnit, "human", "<Forecast> の気温を摂氏と華氏で切り替えるオプションを足して"],
+  // skill の起動の行は、人が打った 1 行になる。同じセッションのほかの行は、どれも人間の投稿にならない。
+  ["claude-code", claudeSkill, "human", "/fix-tests --all"],
 ];
+
+/** allPostsNewestFirst のうち、ツール呼び出しを除いた会話の投稿。 */
+const conversationPostsNewestFirst = allPostsNewestFirst.filter(
+  ([, , author]) => author !== "tool",
+);
 
 /** 投稿を、並びの比較に使う [agent, セッション ID, 書き手, 本文] にする。 */
 function postSummary(post: Post): string[] {
@@ -161,6 +172,23 @@ describe("GET /api/posts", () => {
     expect(posts.filter((post) => post.session.sessionId === claudeReadme)).toHaveLength(3);
   });
 
+  it("skill の起動の行は `/foo 引数` の 1 行の投稿にし、手元のコマンド・中断・通知・シェルの入力・画像だけの行は投稿にしない", async () => {
+    const { posts } = await responseJson<TimelinePage>(await app.request("/api/posts"));
+
+    // fixture のこのセッションは 12 行を持ち、skill の起動の行のほかは、どれも人間の投稿にならない行。
+    expect(posts.filter((post) => post.session.sessionId === claudeSkill).map(postSummary)).toEqual(
+      [["claude-code", claudeSkill, "human", "/fix-tests --all"]],
+    );
+  });
+
+  it("Codex が自分で始めたサブエージェント (guardian) のセッションの行は投稿にしない", async () => {
+    const { posts } = await responseJson<TimelinePage>(await app.request("/api/posts"));
+
+    // fixture のこのセッションは、親の会話の写しを持つ user の行と、判定の assistant の行を持つ。
+    expect(posts.filter((post) => post.session.sessionId === codexGuardian)).toEqual([]);
+    expect(posts.filter((post) => post.text.includes("TRANSCRIPT"))).toEqual([]);
+  });
+
   it("投稿がどのセッションのものかを返す", async () => {
     const body = await responseJson<TimelinePage>(await app.request("/api/posts"));
 
@@ -198,8 +226,32 @@ describe("GET /api/posts", () => {
   it("limit と cursor で続きを取ると、全件を抜けも重なりもなく返す", async () => {
     const pages = await requestAllTimelinePages({ limit: "5" });
 
-    expect(pages.map((page) => page.posts.length)).toEqual([5, 5, 4]);
+    expect(pages.map((page) => page.posts.length)).toEqual([5, 5, 5]);
     expect(pages.flatMap((page) => page.posts).map(postSummary)).toEqual(allPostsNewestFirst);
+  });
+
+  it("authors に会話の書き手を渡すと、ツール呼び出しを返さず、ページを会話の投稿で埋める", async () => {
+    const pages = await requestAllTimelinePages({ authors: "human,agent", limit: "4" });
+
+    // fixture の会話の投稿は 11 件。ツール呼び出しを除いた後の投稿で 4 件ずつのページにする。
+    expect(pages.map((page) => page.posts.length)).toEqual([4, 4, 3]);
+    expect(pages.flatMap((page) => page.posts).map(postSummary)).toEqual(
+      conversationPostsNewestFirst,
+    );
+    expect(pages.flatMap((page) => page.posts).some((post) => post.author === "tool")).toBe(false);
+  });
+
+  it("authors に 1 つの書き手を渡すと、その書き手の投稿だけを返す", async () => {
+    const page = await requestTimelinePage(null, { authors: "tool" });
+
+    expect(page.posts.map(postSummary)).toEqual(
+      allPostsNewestFirst.filter(([, , author]) => author === "tool"),
+    );
+  });
+
+  it("知らない書き手と空の authors は 400 を返す", async () => {
+    expect((await app.request("/api/posts?authors=human,bot")).status).toBe(400);
+    expect((await app.request("/api/posts?authors=")).status).toBe(400);
   });
 
   it("ログのルートが空のディレクトリの時は、空の一覧を返す", async () => {
@@ -359,6 +411,13 @@ describe("GET /api/sessions/:agent/:sessionId/posts", () => {
     expect(response.status).toBe(200);
     const body = await responseJson<{ posts: Post[] }>(response);
     expect(body.posts.map(postSummary)).toEqual(threadSummaries(codexUnit));
+  });
+
+  it("Codex のサブエージェントのセッションは、ログはあるが発言の無いスレッドとして返す", async () => {
+    const response = await app.request(`/api/sessions/codex/${codexGuardian}/posts`);
+
+    expect(response.status).toBe(200);
+    expect((await responseJson<{ posts: Post[] }>(response)).posts).toEqual([]);
   });
 
   it.each([

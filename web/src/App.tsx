@@ -2,6 +2,12 @@ import { type MouseEvent, useEffect, useLayoutEffect, useRef, useState } from "r
 import type { PostSession } from "../../server/src/post.js";
 import { ProjectPage, ProjectRow, WorktreePage } from "./Projects";
 import { handleInAppLinkClick, type Route, routeFromPath, routePath } from "./route";
+import {
+  readShowToolCalls,
+  ShowToolCallsContext,
+  useShowToolCallsSetting,
+  writeShowToolCalls,
+} from "./show-tool-calls";
 import { Thread } from "./Thread";
 import { Timeline } from "./Timeline";
 
@@ -33,6 +39,14 @@ export function App() {
   const scrollYByListPathRef = useRef(new Map<string, number>());
   // いま出している画面。ブラウザの戻る・進むの通知で、離れる画面を知るために使う。
   const currentRouteRef = useRef(route);
+  // ツール呼び出しを表示するか。既定は出さず、変えた値はブラウザに保存して次に開いた時も保つ。
+  const [showToolCalls, setShowToolCalls] = useState(readShowToolCalls);
+
+  /** ツール呼び出しの表示を切り替え、ブラウザに保存する。 */
+  const changeShowToolCalls = (nextShowToolCalls: boolean) => {
+    setShowToolCalls(nextShowToolCalls);
+    writeShowToolCalls(nextShowToolCalls);
+  };
 
   /** 画面の場所を替える。スレッドでない画面は、スレッドを開いた時に隠して残す画面にもする。 */
   const showRoute = (nextRoute: Route) => {
@@ -118,41 +132,65 @@ export function App() {
   };
 
   return (
-    <div className="layout">
-      <nav className="side-nav" aria-label="メニュー">
-        <a className="side-nav-brand" href="/" onClick={onHomeLinkClick}>
-          <span className="brand-mark" aria-hidden="true">
-            ◎
-          </span>
-          <span>agent-timeline</span>
-        </a>
-        <a
-          className={`side-nav-item${route.screen === "home" ? " side-nav-item-active" : ""}`}
-          href="/"
-          onClick={onHomeLinkClick}
-        >
-          ホーム
-        </a>
-      </nav>
-      <main className="main-column">
-        <div hidden={route.screen === "thread"}>
-          <ListScreen
-            key={routePath(listRoute)}
-            listRoute={listRoute}
-            onNavigate={navigate}
-            onBack={goBack}
-            onOpenThread={openThread}
-          />
-        </div>
-        {route.screen === "thread" && (
-          <Thread
-            agent={route.agent}
-            sessionId={route.sessionId}
-            onBack={() => goBack(listRoute)}
-          />
-        )}
-      </main>
-    </div>
+    <ShowToolCallsContext.Provider value={{ showToolCalls, setShowToolCalls: changeShowToolCalls }}>
+      <div className="layout">
+        <nav className="side-nav" aria-label="メニュー">
+          <a className="side-nav-brand" href="/" onClick={onHomeLinkClick}>
+            <span className="brand-mark" aria-hidden="true">
+              ◎
+            </span>
+            <span>agent-timeline</span>
+          </a>
+          <a
+            className={`side-nav-item${route.screen === "home" ? " side-nav-item-active" : ""}`}
+            href="/"
+            onClick={onHomeLinkClick}
+          >
+            ホーム
+          </a>
+          <ShowToolCallsSwitch className="side-nav-toggle" />
+        </nav>
+        <main className="main-column">
+          {/* 投稿を並べる画面は、ツール呼び出しの表示を替えると一覧の API の条件が変わるため、作り直して最初から読む。 */}
+          <div hidden={route.screen === "thread"}>
+            <ListScreen
+              key={`${routePath(listRoute)}:${String(showToolCalls)}`}
+              listRoute={listRoute}
+              onNavigate={navigate}
+              onBack={goBack}
+              onOpenThread={openThread}
+            />
+          </div>
+          {route.screen === "thread" && (
+            <Thread
+              agent={route.agent}
+              sessionId={route.sessionId}
+              onBack={() => goBack(listRoute)}
+            />
+          )}
+        </main>
+      </div>
+    </ShowToolCallsContext.Provider>
+  );
+}
+
+/**
+ * 「ツール呼び出しを表示」のスイッチ。メニューに置き、メニューが隠れる狭い画面ではホームの見出しにも置く
+ * (className で置き場所の見た目を替える)。
+ */
+function ShowToolCallsSwitch({ className }: { className: string }) {
+  const { showToolCalls, setShowToolCalls } = useShowToolCallsSetting();
+  return (
+    <label className={className}>
+      <input
+        type="checkbox"
+        role="switch"
+        className="toggle-switch"
+        checked={showToolCalls}
+        onChange={(event) => setShowToolCalls(event.target.checked)}
+      />
+      <span>ツール呼び出しを表示</span>
+    </label>
   );
 }
 
@@ -174,6 +212,7 @@ function ListScreen({
         <>
           <header className="column-header">
             <h1 className="column-title">ホーム</h1>
+            <ShowToolCallsSwitch className="column-header-toggle" />
           </header>
           <ProjectRow
             onOpenProject={(projectName) => onNavigate({ screen: "project", projectName })}

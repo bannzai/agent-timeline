@@ -17,18 +17,81 @@ import {
 // Claude Code のログの形式の知識は、このファイルの中だけに置く (documents/PROJECT.md「入力」)。
 
 /**
- * Claude Code が user の行として書く、人間が書いたのではない文の書き出し。2026-09〜10 の Claude Code のログで、
- * isMeta の付かない user の行の先頭に現れたものを集めた。人間が書いた文 (`<div>` で始まる指示など) と、
- * 人間が打ったスラッシュコマンド (`<command-name>`)・シェルのコマンド (`<bash-input>`) は残す。
+ * Claude Code が user の行として書く、人間が agent に向けて書いたのではない文の書き出し。2026-09〜10 の Claude Code
+ * (2.1.179〜2.1.294) のログで、isMeta の付かない user の行の先頭に現れたものを集めた (一覧と件数は
+ * documents/PROJECT.md「投稿にしない行」)。人間が書いた文 (`<div>` や `<pasted_content>` で始まる指示など) を
+ * 落とさないよう、既知のものに限る。
  */
-const nonHumanTextPrefixes = ["<task-notification", "<local-command-stdout", "<bash-stdout"];
+const nonHumanTextPrefixes = [
+  // バックグラウンドの処理の完了通知
+  "<task-notification",
+  // Claude Code が手元で処理するコマンド (`/usage`・`/login` など) とその出力。agent には届かない。
+  // skill の起動の行 (`<command-message>` で始まる) は別に扱う (skillLaunchPostText)
+  "<command-name>",
+  "<local-command-stdout",
+  // 人が `!` で実行したシェルのコマンドと出力。agent への指示ではない
+  "<bash-input",
+  "<bash-stdout",
+  "<bash-stderr",
+  // 人が処理を中断した通知 (`[Request interrupted by user]`・`[Request interrupted by user for tool use]`)。本文が無い
+  "[Request interrupted by user",
+  // 人の入力ではないとラベルの付いた通知
+  "[SYSTEM NOTIFICATION",
+  // 別のセッション (サブエージェント・teammate) からの報告の転送。この行への agent の返答は assistant の行に残る
+  "Another Claude session sent a message",
+];
 
-/** 書き手が author の文を投稿にするか。空の文と、人間の行に Claude Code が書いた文は投稿にしない。 */
-function isPostText(text: string, author: PostAuthor): boolean {
-  if (text.trim() === "") {
-    return false;
+/** `<system-reminder>` の 1 つの塊。 */
+const systemReminderBlock = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+
+/** `<system-reminder>` だけの文か。人間の文に添えられた注意ではなく、注意だけの行。塊の間に人間の文があれば false。 */
+function isSystemReminderOnlyText(text: string): boolean {
+  return text.includes("<system-reminder>") && text.replace(systemReminderBlock, "").trim() === "";
+}
+
+/** 画像の添付の印 (`[Image #1]`) だけの文。文に添えられている時は印を残す。 */
+const imageMarksOnlyText = /^(\s*\[Image #\d+\])+\s*$/;
+
+/**
+ * skill (`/foo 引数`) を起動した時に Claude Code が書く行の、人が打った 1 行。行は `<command-message>` で始まり、
+ * `<command-name>` と `<command-args>` を持つ。展開された SKILL.md の本文は isMeta の行に書かれ、ここには無い。
+ * `<command-name>` が無ければ null を返す。
+ */
+function skillLaunchPostText(text: string): string | null {
+  const commandName = /<command-name>([^<]*)<\/command-name>/.exec(text)?.[1]?.trim();
+  if (commandName === undefined || commandName === "") {
+    return null;
   }
-  return author !== "human" || !nonHumanTextPrefixes.some((prefix) => text.startsWith(prefix));
+  // 引数は `<div> の余白を直して` のように `<` を含みうるため、閉じるタグまでを取る。
+  const commandArgs = /<command-args>([\s\S]*?)<\/command-args>/.exec(text)?.[1]?.trim() ?? "";
+  return commandArgs === "" ? commandName : `${commandName} ${commandArgs}`;
+}
+
+/**
+ * user の行の文を、人間の指示の投稿の本文にする。人間が agent に向けて書いた文でなければ null を返す。
+ * skill の起動の行は、人が打った `/foo 引数` の 1 行にする。
+ */
+function humanPostText(text: string): string | null {
+  const trimmedText = text.trimStart();
+  if (trimmedText.startsWith("<command-message>")) {
+    return skillLaunchPostText(text);
+  }
+  if (
+    nonHumanTextPrefixes.some((prefix) => trimmedText.startsWith(prefix)) ||
+    isSystemReminderOnlyText(text) ||
+    imageMarksOnlyText.test(text)
+  ) {
+    return null;
+  }
+  return text;
+}
+
+/** 書き手が author の文を投稿の本文にする。空の文と、人間の行に Claude Code が書いた文は投稿にせず null を返す。 */
+function postText(text: string, author: PostAuthor): string | null {
+  if (text.trim() === "") {
+    return null;
+  }
+  return author === "human" ? humanPostText(text) : text;
 }
 
 /**
@@ -153,12 +216,13 @@ export function parseClaudeCodeSessionLog(sessionId: string, logText: string): P
     const content = entry.message.content;
 
     if (typeof content === "string") {
-      if (isPostText(content, textAuthor)) {
+      const text = postText(content, textAuthor);
+      if (text !== null) {
         posts.push({
           id: postId("claude-code", sessionId, lineIndex, 0),
           session,
           author: textAuthor,
-          text: content,
+          text,
           toolResult: null,
           timestamp,
         });
@@ -174,16 +238,16 @@ export function parseClaudeCodeSessionLog(sessionId: string, logText: string): P
         return;
       }
       const id = postId("claude-code", sessionId, lineIndex, blockIndex);
-      if (
-        block.type === "text" &&
-        typeof block.text === "string" &&
-        isPostText(block.text, textAuthor)
-      ) {
+      const text =
+        block.type === "text" && typeof block.text === "string"
+          ? postText(block.text, textAuthor)
+          : null;
+      if (text !== null) {
         posts.push({
           id,
           session,
           author: textAuthor,
-          text: block.text,
+          text,
           toolResult: null,
           timestamp,
         });

@@ -1,12 +1,16 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 import type { TimelinePage } from "../../server/src/post.js";
 import { expectedPostGroups, renderedPostGroups } from "../post-groups.js";
+import { enableShowToolCalls } from "../show-tool-calls.js";
 
 // 相対時刻をスクリーンショットごとに同じにするため、fixture の最も新しい投稿 (2026-10-02T10:30:10Z) の少し後で時計を止める。
 const fixedNow = new Date("2026-10-02T10:31:00.000Z");
 
 test.beforeEach(async ({ page }) => {
   await page.clock.setFixedTime(fixedNow);
+  // ここのテストはツール呼び出しの表示と、ツール呼び出しを含む投稿の並びを確かめる。既定の表示 (ツール呼び出しを出さない)
+  // は tool-calls-toggle.spec.ts が確かめる。
+  await enableShowToolCalls(page);
 });
 
 /** 要素の列から、属性の値を上から順に返す。 */
@@ -56,17 +60,19 @@ test("同じセッションの連続する投稿を、先頭だけに投稿者�
 
   const posts = page.getByTestId("post");
   await expect(posts).toHaveCount(allPosts.length);
-  // fixture の 4 つのセッションの投稿は、日時が重ならず、セッションごとに続けて並ぶ。
+  // fixture の 5 つのセッションの投稿は、日時が重ならず、セッションごとに続けて並ぶ。
   const groups = expectedPostGroups(allPosts);
-  expect(groups).toHaveLength(4);
+  expect(groups).toHaveLength(5);
   expect(await renderedPostGroups(posts)).toEqual(groups);
   await expect(page.getByTestId("avatar")).toHaveCount(groups.length);
   // まとまりの続きでも、人間の指示の行とツール呼び出しの 1 行の表示は残る。fixture の人間の指示は、どれもセッションの
-  // 最初の発言で、新しい順のまとまりの末尾 (続きの投稿) に並ぶ。
+  // 最初の発言で、新しい順のまとまりの末尾 (続きの投稿) に並ぶ。投稿が 1 件だけのセッション (skill の起動の 1 行) は
+  // まとまりの先頭になるため、続きの投稿には数えない。
   const continuedPosts = page.locator(".timeline-post-continued");
   await expect(continuedPosts.getByTestId("tool-call")).toHaveCount(4);
   await expect(continuedPosts.getByTestId("human-context")).toHaveCount(
-    allPosts.filter((post) => post.author === "human").length,
+    allPosts.filter((post) => post.author === "human").length -
+      groups.filter((group) => group.length === 1).length,
   );
 });
 
@@ -128,7 +134,7 @@ test("下まで読むと続きを読み込む", async ({ page }) => {
   expect(await attributeValues(page.getByTestId("post"), "data-post-id")).toEqual(
     allPosts.map((post) => post.id),
   );
-  // 14 件を 5 件ずつ読むため、最初のページと 2 回の続きを読む。
+  // 15 件を 5 件ずつ読むため、最初のページと 2 回の続きを読む。
   expect(requestedCursors).toHaveLength(3);
   expect(requestedCursors[0]).toBeNull();
   // ページの境目がまとまりの途中にあっても (2 つ目のセッションの 3 件は 5 件目と 6 件目の間で分かれる)、

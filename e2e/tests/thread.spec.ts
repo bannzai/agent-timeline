@@ -2,6 +2,7 @@ import { expect, type Locator, type Page, test } from "@playwright/test";
 import { readFile } from "node:fs/promises";
 import type { Post } from "../../server/src/post.js";
 import { fakeTmuxCallsFile } from "../fake-commands.js";
+import { enableShowToolCalls } from "../show-tool-calls.js";
 
 /**
  * fixture の Claude Code のセッションのうち、ツール呼び出しとその結果を持つもの。
@@ -21,6 +22,9 @@ const fixedNow = new Date("2026-10-02T10:31:00.000Z");
 
 test.beforeEach(async ({ page }) => {
   await page.clock.setFixedTime(fixedNow);
+  // ここのテストはツール呼び出しを含む発言の並びと、ツール呼び出しを開く表示を確かめる。既定の表示 (ツール呼び出しを
+  // 出さない) は tool-calls-toggle.spec.ts が確かめる。
+  await enableShowToolCalls(page);
 });
 
 /** 要素の列から、属性の値を上から順に返す。 */
