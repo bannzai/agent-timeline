@@ -41,8 +41,13 @@ const nonHumanTextPrefixes = [
   "Another Claude session sent a message",
 ];
 
-/** `<system-reminder>` だけの文。人間の文に添えられた注意ではなく、注意だけの行。 */
-const systemReminderOnlyText = /^\s*<system-reminder>[\s\S]*<\/system-reminder>\s*$/;
+/** `<system-reminder>` の 1 つの塊。 */
+const systemReminderBlock = /<system-reminder>[\s\S]*?<\/system-reminder>/g;
+
+/** `<system-reminder>` だけの文か。人間の文に添えられた注意ではなく、注意だけの行。塊の間に人間の文があれば false。 */
+function isSystemReminderOnlyText(text: string): boolean {
+  return text.includes("<system-reminder>") && text.replace(systemReminderBlock, "").trim() === "";
+}
 
 /** 画像の添付の印 (`[Image #1]`) だけの文。文に添えられている時は印を残す。 */
 const imageMarksOnlyText = /^(\s*\[Image #\d+\])+\s*$/;
@@ -57,7 +62,8 @@ function skillLaunchPostText(text: string): string | null {
   if (commandName === undefined || commandName === "") {
     return null;
   }
-  const commandArgs = /<command-args>([^<]*)<\/command-args>/.exec(text)?.[1]?.trim() ?? "";
+  // 引数は `<div> の余白を直して` のように `<` を含みうるため、閉じるタグまでを取る。
+  const commandArgs = /<command-args>([\s\S]*?)<\/command-args>/.exec(text)?.[1]?.trim() ?? "";
   return commandArgs === "" ? commandName : `${commandName} ${commandArgs}`;
 }
 
@@ -72,7 +78,7 @@ function humanPostText(text: string): string | null {
   }
   if (
     nonHumanTextPrefixes.some((prefix) => trimmedText.startsWith(prefix)) ||
-    systemReminderOnlyText.test(text) ||
+    isSystemReminderOnlyText(text) ||
     imageMarksOnlyText.test(text)
   ) {
     return null;

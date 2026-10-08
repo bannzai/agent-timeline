@@ -39,6 +39,12 @@ describe("parseClaudeCodeSessionLog の人間の行", () => {
         },
       ]),
     ).toEqual(["/read-issue 31"]);
+    // `<` を含む引数も、閉じるタグまでを引数として残す。
+    expect(
+      humanPostTexts(
+        "<command-message>fix</command-message>\n<command-name>/fix</command-name>\n<command-args><div> の余白を直して</command-args>",
+      ),
+    ).toEqual(["/fix <div> の余白を直して"]);
     // `<command-name>` を持たない起動の行は、何を打ったか分からないため投稿にしない。
     expect(humanPostTexts("<command-message>broken</command-message>")).toEqual([]);
   });
@@ -58,6 +64,10 @@ describe("parseClaudeCodeSessionLog の人間の行", () => {
     ["`!` で実行したシェルの出力", "<bash-stdout>ok</bash-stdout><bash-stderr></bash-stderr>"],
     ["人の入力ではない通知", "[SYSTEM NOTIFICATION - NOT USER INPUT]\n架空の通知"],
     ["注意だけの行", "<system-reminder>\n架空の注意\n</system-reminder>"],
+    [
+      "注意が 2 つだけの行",
+      "<system-reminder>注意 1</system-reminder>\n\n<system-reminder>注意 2</system-reminder>",
+    ],
     ["別のセッションからの報告の転送", "Another Claude session sent a message:\n架空の報告"],
     ["画像の印だけの行", "[Image #1]"],
     ["複数の画像の印だけの行", "[Image #1] [Image #2]\n"],
@@ -72,6 +82,10 @@ describe("parseClaudeCodeSessionLog の人間の行", () => {
     [
       "注意に続く人間の文は残す",
       "<system-reminder>\n架空の注意\n</system-reminder>\nテストも足して",
+    ],
+    [
+      "注意に挟まれた人間の文は残す",
+      "<system-reminder>注意 1</system-reminder>修正して<system-reminder>注意 2</system-reminder>",
     ],
     ["`<` で始まる人間の文は残す", "<div> の余白を直して"],
     ["貼り付けた文は残す", '<pasted_content id="0000">\n架空の貼り付け\n</pasted_content>\n直して'],
