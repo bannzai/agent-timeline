@@ -4,6 +4,7 @@ import { fileURLToPath } from "node:url";
 import { expect, type Page, test, type TestInfo } from "@playwright/test";
 import type { Post, TimelinePage } from "../../server/src/post.js";
 import { expectedPostGroups, renderedPostGroups } from "../post-groups.js";
+import { enableShowToolCalls } from "../show-tool-calls.js";
 
 // playwright.config.ts の chromium-live-updates のプロジェクトで、ログのルートが写した fixture のサーバーに対して動く。
 
@@ -82,6 +83,8 @@ test.beforeEach(async ({ page }, testInfo) => {
     );
   }
   await page.clock.setFixedTime(fixedNow);
+  // ここのテストは、画面の投稿を一覧の API の全投稿 (ツール呼び出しを含む) と比べる。
+  await enableShowToolCalls(page);
 });
 
 test("表示中にログへ追記すると新着の表示が出て、選ぶとその投稿が先頭に現れる", async ({
@@ -120,7 +123,7 @@ test("表示中にログへ追記すると新着の表示が出て、選ぶと�
   // 新着は、先頭のまとまり (別のセッション) が挟まるため、同じセッションの前からの投稿とは別のまとまりになる。
   const groups = await renderedPostGroups(posts);
   expect(groups).toEqual(expectedPostGroups(await requestTimelinePosts(page)));
-  expect(groups).toHaveLength(5);
+  expect(groups).toHaveLength(6);
   expect(groups[0]).toHaveLength(1);
   await page.screenshot({ path: testInfo.outputPath("live-new-posts-shown.png") });
 });
