@@ -169,6 +169,17 @@ button {
   border-right: 1px solid var(--border);
 }
 
+/* ホームの見出しに置くツール呼び出しのスイッチ。メニューが見える幅では、メニューのスイッチと重複するため出さない。 */
+.column-header-toggle {
+  display: none;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  color: var(--text-secondary);
+  font-size: 13px;
+  cursor: pointer;
+}
+
 @media (max-width: 700px) {
   .side-nav {
     display: none;
@@ -177,6 +188,11 @@ button {
   .main-column {
     border-left: none;
     border-right: none;
+  }
+
+  /* メニューが隠れる幅では、ホームの見出しの右端にツール呼び出しのスイッチを出す。 */
+  .column-header-toggle {
+    display: flex;
   }
 }
 

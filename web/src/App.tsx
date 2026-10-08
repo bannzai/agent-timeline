@@ -2,7 +2,12 @@ import { type MouseEvent, useEffect, useLayoutEffect, useRef, useState } from "r
 import type { PostSession } from "../../server/src/post.js";
 import { ProjectPage, ProjectRow, WorktreePage } from "./Projects";
 import { handleInAppLinkClick, type Route, routeFromPath, routePath } from "./route";
-import { readShowToolCalls, ShowToolCallsContext, writeShowToolCalls } from "./show-tool-calls";
+import {
+  readShowToolCalls,
+  ShowToolCallsContext,
+  useShowToolCallsSetting,
+  writeShowToolCalls,
+} from "./show-tool-calls";
 import { Thread } from "./Thread";
 import { Timeline } from "./Timeline";
 
@@ -127,7 +132,7 @@ export function App() {
   };
 
   return (
-    <ShowToolCallsContext.Provider value={showToolCalls}>
+    <ShowToolCallsContext.Provider value={{ showToolCalls, setShowToolCalls: changeShowToolCalls }}>
       <div className="layout">
         <nav className="side-nav" aria-label="メニュー">
           <a className="side-nav-brand" href="/" onClick={onHomeLinkClick}>
@@ -143,17 +148,7 @@ export function App() {
           >
             ホーム
           </a>
-          <label className="side-nav-toggle">
-            <input
-              type="checkbox"
-              role="switch"
-              className="toggle-switch"
-              data-testid="show-tool-calls"
-              checked={showToolCalls}
-              onChange={(event) => changeShowToolCalls(event.target.checked)}
-            />
-            <span>ツール呼び出しを表示</span>
-          </label>
+          <ShowToolCallsSwitch className="side-nav-toggle" />
         </nav>
         <main className="main-column">
           {/* 投稿を並べる画面は、ツール呼び出しの表示を替えると一覧の API の条件が変わるため、作り直して最初から読む。 */}
@@ -179,6 +174,26 @@ export function App() {
   );
 }
 
+/**
+ * 「ツール呼び出しを表示」のスイッチ。メニューに置き、メニューが隠れる狭い画面ではホームの見出しにも置く
+ * (className で置き場所の見た目を替える)。
+ */
+function ShowToolCallsSwitch({ className }: { className: string }) {
+  const { showToolCalls, setShowToolCalls } = useShowToolCallsSetting();
+  return (
+    <label className={className}>
+      <input
+        type="checkbox"
+        role="switch"
+        className="toggle-switch"
+        checked={showToolCalls}
+        onChange={(event) => setShowToolCalls(event.target.checked)}
+      />
+      <span>ツール呼び出しを表示</span>
+    </label>
+  );
+}
+
 /** 投稿を並べる画面。タイムライン・プロジェクトのページ・worktree のページのどれかを出す。 */
 function ListScreen({
   listRoute,
@@ -197,6 +212,7 @@ function ListScreen({
         <>
           <header className="column-header">
             <h1 className="column-title">ホーム</h1>
+            <ShowToolCallsSwitch className="column-header-toggle" />
           </header>
           <ProjectRow
             onOpenProject={(projectName) => onNavigate({ screen: "project", projectName })}

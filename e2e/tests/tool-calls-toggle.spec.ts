@@ -88,6 +88,28 @@ test("既定ではタイムラインとスレッドにツール呼び出しが�
   });
 });
 
+test("メニューが隠れる狭い画面では、ホームの見出しのスイッチで切り替えられる", async ({
+  page,
+}, testInfo) => {
+  const allPosts = await requestPosts(page, {});
+  const toolPostCount = allPosts.filter((post) => post.author === "tool").length;
+  // メニュー (.side-nav) は幅 700px 以下で隠れる (web/src/styles.css)。
+  await page.setViewportSize({ width: 600, height: 900 });
+  await page.goto("/");
+
+  await expect(page.getByRole("navigation", { name: "メニュー" })).toBeHidden();
+  const headerSwitch = showToolCallsSwitch(page);
+  await expect(headerSwitch).toBeVisible();
+  await expect(headerSwitch).not.toBeChecked();
+  const posts = page.getByTestId("post");
+  await expect(posts).toHaveCount(allPosts.length - toolPostCount);
+
+  await headerSwitch.check();
+  await expect(posts).toHaveCount(allPosts.length);
+  await expect(page.getByTestId("tool-call")).toHaveCount(toolPostCount);
+  await page.screenshot({ path: testInfo.outputPath("timeline-narrow-tool-calls-shown.png") });
+});
+
 test("スイッチを ON にするとツール呼び出しが出て、再読み込みしても設定が保たれる", async ({
   page,
 }, testInfo) => {

@@ -30,10 +30,29 @@ export function writeShowToolCalls(showToolCalls: boolean): void {
   }
 }
 
-/** 画面全体に配る、ツール呼び出しを表示するかの設定。App が値を持ち、タイムラインとスレッドが読む。 */
-export const ShowToolCallsContext = createContext(false);
+/** 画面全体に配る、ツール呼び出しを表示するかの設定と、それを替える関数。 */
+export interface ShowToolCallsSetting {
+  /** ツール呼び出しを表示するか。 */
+  showToolCalls: boolean;
+  /** 設定を替え、ブラウザに保存する。 */
+  setShowToolCalls: (showToolCalls: boolean) => void;
+}
+
+/**
+ * 画面全体に配る設定。App が値を持ち、スイッチが替え、タイムラインとスレッドが読む。
+ * Provider の外で読んだ時の値は、既定の表示 (ツール呼び出しを出さない) と同じにし、替える関数は何もしない。
+ */
+export const ShowToolCallsContext = createContext<ShowToolCallsSetting>({
+  showToolCalls: false,
+  setShowToolCalls: () => {},
+});
+
+/** ツール呼び出しを表示するかの設定と、それを替える関数を読む。 */
+export function useShowToolCallsSetting(): ShowToolCallsSetting {
+  return useContext(ShowToolCallsContext);
+}
 
 /** ツール呼び出しを表示するかの設定を読む。 */
 export function useShowToolCalls(): boolean {
-  return useContext(ShowToolCallsContext);
+  return useShowToolCallsSetting().showToolCalls;
 }
