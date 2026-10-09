@@ -1,6 +1,6 @@
 # agent-timeline
 
-Claude Code / Codex のセッションを X のタイムライン風に表示する localhost の Web アプリ。投稿はセッションの発言、スレッドは会話、返信はそのセッションへの指示になる。OSS (MIT) で、ドキュメントとコードのコメントは日本語で書く (`documents/DIRECTION.md`「決めたこと」2026-10-04)。
+Claude Code / Codex のセッションを X のタイムライン風に表示する localhost の Web アプリ。投稿はセッションの発言、スレッドは会話、返信はそのセッションへの指示になる。OSS (MIT) で、ドキュメントとコードのコメントは日本語で書く (`documents/DIRECTION.md`「決めたこと」2026-10-04)。末尾の castle の区間「基本ルール」にある OSS の英語の例外は、この決定が優先されるためこのリポジトリには当てない。
 
 ## 文書
 
@@ -16,7 +16,7 @@ Claude Code / Codex のセッションを X のタイムライン風に表示す
 - ブランチを push して PR を作ると、PR ごとに CI が動く。PR の無いブランチで動かす時: `gh workflow run ci.yml --ref <ブランチ>`
 - CI の手順が検証コマンドになる: `npm ci` → `npm run lint` → `npm run format:check` → `npm run typecheck` → `npm run build` → `npm test` → `npm run test:e2e`
 - 引数なしの `make` は、人が手で動作確認するための入口で、ビルドしてサーバーを起動し http://127.0.0.1:7878 をブラウザで開く (`Makefile` の `web`)。検査・テストは含めず CI が行う。agent は開発マシンで実行しない
-- 結果を待って読む: `gh pr checks <PR> --watch`。失敗は `gh run view <run ID> --log-failed`
+- 結果を待って読む: `gh pr checks <PR> --watch`。失敗は `gh run view <run ID> --log-failed`。Claude Code のクラウドセッションでは `--watch` が GraphQL で 403 になるため、`gh pr checks <PR> --json name,state,bucket` (`.claude/scripts/gh-shim` が REST に翻訳する) を繰り返して読む
 - 画面の確認: E2E の job が Playwright の出力 (スクリーンショットを含む) を `e2e-screenshots` artifact として上げる。`gh run download <run ID> -n e2e-screenshots -D ./tmp/e2e-screenshots-<run ID>` で取得し、PNG を Read して画面を判断する
 - 画面の振る舞いを足す時は、`e2e/tests/` の E2E テストでその画面を操作し、`testInfo.outputPath(...)` にスクリーンショットを保存する。そのスクリーンショットが変更の証拠になる
 - CI には本物のセッションのログが無い。テストと E2E は、ログのルートを差し替える環境変数を通して `fixtures/` の合成セッションを読む (`.claude/rules/synthetic-fixtures.md`)
