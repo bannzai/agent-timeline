@@ -1,0 +1,159 @@
+#!/usr/bin/env bash
+#
+# castle-git-hook - git のグローバル hook (`~/.gitconfig` の core.hooksPath = ~/.claude/hooks/git) の本体
+#
+# 同じディレクトリの hook 名の symlink (commit-msg・pre-commit・pre-push 等) から呼ばれ、basename "$0" を hook 名として扱う。
+#   1. commit-msg の時だけ、全リポジトリ共通の検査として pre-publish-leak-check skill の
+#      `check-leaks.sh --staged --message-file "$1"` を実行する (電話番号・secret の正規表現と Jev。検出の種別と止め方は
+#      下の「check-leaks.sh の結果の扱い」。merge の途中の扱い・Jev が使えない時の fail-open は check-leaks.sh のヘッダーに従う)
+#   2. 共通の検査の後に、リポジトリの同じ名前の hook を次の順に呼び継ぐ (core.hooksPath を設定すると git はこれらを
+#      実行しなくなるため)。引数と標準入力 (pre-push・post-rewrite・reference-transaction 等が受け取る) はそのまま渡し、
+#      最初に非 0 で終わった hook の exit code で止める
+#      a. <git の共通ディレクトリ>/hooks/<hook 名> (core.hooksPath を設定する前の既定の場所。core.hooksPath を設定した
+#         リポジトリでは `git rev-parse --git-path hooks` が core.hooksPath を返すため、共通ディレクトリから組み立てる)
+#      b. <作業ツリーのルート>/.githooks/<hook 名> (リポジトリに commit した hook。bare リポジトリでは無い)。
+#         信頼したリポジトリだけで実行する: origin の GitHub の owner が git config の castle.githooksTrustedOwner
+#         (複数可。~/.gitconfig で設定) のどれかか、リポジトリの設定で castle.githooks = true にした時。
+#         それ以外で .githooks/<hook 名> がある時は標準エラーに 1 行出して呼ばない。clone した第三者のリポジトリの
+#         .githooks/post-checkout が clone の直後に利用者の権限で実行されるのを防ぐため (.git/config は clone で
+#         運ばれないため、リポジトリの中身からは信頼を得られない)
+#      どちらも実行権限があるものだけを実行する (git が hook を実行する条件と同じ)。この hook 自身に解決されるものは
+#      呼ばず (同じ hook の再帰を防ぐため)、実体が同じものは 1 回だけ呼ぶ
+#
+# check-leaks.sh の結果の扱い:
+#   - exit 0: 通す
+#   - exit 1 (検出あり): 検出の各行と、確認済みの値を標準エラーに出してコミットを止める。停止メッセージは検出の種別で
+#     出し分ける: 個人情報・secret の候補 (phone / secret / jev-phone と、Jev の personal-info の規約。規約 id の SSOT は
+#     ~/.claude/skills/jev-check/assets/rules/personal-info.json)、コーディング規約の候補 (それ以外の jev(<規約 id>))、
+#     その両方。確認済みの値は、検出の組 (<種別>: <位置>)・ステージ済みの差分・コミットメッセージの hash。検出を目視して
+#     誤検知・プレースホルダ・直さない規約の候補と判断した時は、出力された値を環境変数 CASTLE_LEAK_CHECK_ACK に入れて
+#     同じコミットをやり直すと、検出・差分・メッセージが同じ限り通す。判断は PR body に 1 行書く (コミットメッセージに
+#     書くとメッセージが変わって値も変わるため、書き換えた後のコミットで出る新しい値を使う。扱いの SSOT は
+#     ~/.claude/rules/no-personal-info-in-repositories.md と pre-publish-leak-check skill「Phase 3: 検出時の扱い」)。
+#     抜粋は値に含めない (Jev の確率が実行ごとに揺れても同じ検出なら同じ値にするため)。差分とメッセージを含めるのは、
+#     確認した後に内容が変わった commit を通さないため
+#   - exit 2 等 (引数・環境エラー): 検査ができていないため止める
+#   - check-leaks.sh が無い (castle を入れていないマシン・CI 等): 標準エラーに 1 行出して共通の検査を省き、呼び継ぎは続ける
+#
+# 共通の検査は全リポジトリの commit に行う。一時リポジトリに commit するテストは、テストの側で
+# GIT_CONFIG_PARAMETERS="'core.hooksPath'='/dev/null'" を export してこの hook を外す
+#
+# 環境変数:
+#   CASTLE_GIT_HOOK_CHECK_LEAKS  check-leaks.sh のパス (テストで差し替える。既定は ~/.claude/skills/pre-publish-leak-check/scripts/check-leaks.sh)
+#   CASTLE_LEAK_CHECK_ACK        止められた時に出した確認済みの値 (上記)
+#
+# 出力: 標準エラーに検査の要約・検出・省いた理由。標準出力には呼び継いだ hook の出力だけが出る
+# Exit: 共通の検査で止めた時は 1。それ以外は呼び継いだ hook の exit code (呼ぶ hook が無ければ 0)
+# 冪等: 本スクリプトは状態を持たない (check-leaks.sh が Jev の点検済みの差分を記録する。呼び継いだ hook の副作用はその hook による)
+# 決定: https://github.com/bannzai/castle/issues/1495
+
+set -uo pipefail
+
+HOOK_NAME="$(basename "$0")"
+SELF="$(realpath "${BASH_SOURCE[0]}")"
+LOG_PREFIX="[castle git hook $HOOK_NAME]"
+
+# leak_check <コミットメッセージのファイル>: 共通の検査。止める時は exit 1 でスクリプトごと終える
+leak_check() {
+  local check_leaks="${CASTLE_GIT_HOOK_CHECK_LEAKS:-$HOME/.claude/skills/pre-publish-leak-check/scripts/check-leaks.sh}"
+  if [ ! -f "$check_leaks" ]; then
+    echo "$LOG_PREFIX check-leaks.sh が無いため個人情報の検査を省いた: $check_leaks" >&2
+    return 0
+  fi
+  local findings rc
+  findings="$(bash "$check_leaks" --staged --message-file "$1")"
+  rc=$?
+  case "$rc" in
+    0) return 0 ;;
+    1) ;;
+    *)
+      echo "$LOG_PREFIX check-leaks.sh が exit $rc で失敗し、検査ができていないためコミットを止めた (上の標準エラーの原因を直してやり直す)" >&2
+      exit 1
+      ;;
+  esac
+  local ack
+  ack="$({
+    printf '%s\n' "$findings" | awk -F': ' 'NF >= 2 { print $1 ": " $2 }' | LC_ALL=C sort -u
+    git diff --cached --no-color --no-ext-diff --no-textconv
+    cat "$1"
+  } | git hash-object --stdin | cut -c1-16)"
+  printf '%s\n' "$findings" >&2
+  if [ "${CASTLE_LEAK_CHECK_ACK:-}" = "$ack" ]; then
+    echo "$LOG_PREFIX 上の検出は CASTLE_LEAK_CHECK_ACK で確認済みとして通した" >&2
+    return 0
+  fi
+  # 検出の種別 (ヘッダー「check-leaks.sh の結果の扱い」)。種別を読めない行は個人情報・secret の側に数える
+  local rule_count leak_count
+  rule_count="$(printf '%s\n' "$findings" | grep -E '^jev\(' | grep -cvE '^jev\((personal-(address|email|name)|phone-number-in-context)\)')"
+  leak_count="$(printf '%s\n' "$findings" | grep -cve '^$')"
+  leak_count=$((leak_count - rule_count))
+  if [ "$rule_count" -eq 0 ]; then
+    echo "$LOG_PREFIX 個人情報・secret の候補を検出したためコミットを止めた。" >&2
+    echo "  - 上の各行の位置の実物を読み、本物の疑いがあれば取り除いてからコミットをやり直す" >&2
+  elif [ "$leak_count" -eq 0 ]; then
+    echo "$LOG_PREFIX コーディング規約の候補 (jev(<規約 id>)) を検出したためコミットを止めた (個人情報・secret の検出ではない)。" >&2
+    echo "  - 上の各行の位置の実物と ~/.claude/rules/<規約> を読み、違反なら直してからコミットをやり直す" >&2
+  else
+    echo "$LOG_PREFIX 個人情報・secret の候補とコーディング規約の候補を検出したためコミットを止めた。" >&2
+    echo "  - 上の各行の位置の実物を読み、個人情報・secret の候補 (phone / secret / jev-phone / jev(personal-*)) は本物の疑いがあれば取り除き、" >&2
+    echo "    コーディング規約の候補 (それ以外の jev(<規約 id>)) は ~/.claude/rules/<規約> と照らして違反なら直してからコミットをやり直す" >&2
+  fi
+  cat >&2 <<EOF
+  - 誤検知・プレースホルダ・直さない規約の候補と判断した時は、差分とメッセージを変えずに
+    CASTLE_LEAK_CHECK_ACK=$ack を付けて同じコミットをやり直し、その判断を PR body に 1 行書く
+  - 判断をコミットメッセージに書く時 (PR を作らない commit) は、メッセージを書き換えてから ACK を付けずにもう 1 度コミットし、
+    その時に出る新しい値を付けてやり直す (値は検出・差分・メッセージから作るため、メッセージを変えると変わる)
+  扱いの SSOT: ~/.claude/rules/no-personal-info-in-repositories.md
+EOF
+  exit 1
+}
+
+# githooks_trusted: このリポジトリの .githooks を実行してよいなら 0 (条件はヘッダー)
+githooks_trusted() {
+  [ "$(git config --bool --get castle.githooks 2>/dev/null)" = true ] && return 0
+  local owner trusted
+  owner="$(git config --get remote.origin.url 2>/dev/null | sed -nE 's#^(https?://|ssh://)?([^@/]+@)?github\.com[:/]([^/]+)/.*#\3#p')"
+  [ -n "$owner" ] || return 1
+  while IFS= read -r trusted; do
+    [ "$trusted" = "$owner" ] && return 0
+  done < <(git config --get-all castle.githooksTrustedOwner 2>/dev/null)
+  return 1
+}
+
+# repo_hooks: 呼び継ぐリポジトリの hook のパスを、実行する順に 1 行ずつ出す
+repo_hooks() {
+  local common_dir top candidate real seen=$'\n'"$SELF"$'\n'
+  common_dir="$(git rev-parse --path-format=absolute --git-common-dir 2>/dev/null)" || return 0
+  top="$(git rev-parse --show-toplevel 2>/dev/null || true)"
+  for candidate in "$common_dir/hooks/$HOOK_NAME" ${top:+"$top/.githooks/$HOOK_NAME"}; do
+    [ -f "$candidate" ] && [ -x "$candidate" ] || continue
+    # 実体が同じもの (この hook 自身と、.git/hooks/<名前> が .githooks/<名前> への symlink の時の 2 つ目) は 1 回だけ呼ぶ
+    real="$(realpath "$candidate")"
+    case "$seen" in *$'\n'"$real"$'\n'*) continue ;; esac
+    seen+="$real"$'\n'
+    if [ "$candidate" = "$top/.githooks/$HOOK_NAME" ] && ! githooks_trusted; then
+      echo "$LOG_PREFIX 信頼していないリポジトリのため .githooks/$HOOK_NAME を実行しなかった (castle.githooksTrustedOwner に owner を足すか、git config castle.githooks true で有効にする)" >&2
+      continue
+    fi
+    printf '%s\n' "$candidate"
+  done
+}
+
+if [ "$HOOK_NAME" = commit-msg ]; then
+  leak_check "$1"
+fi
+
+HOOKS=()
+while IFS= read -r hook; do HOOKS+=("$hook"); done < <(repo_hooks)
+[ "${#HOOKS[@]}" -eq 0 ] && exit 0
+
+# 標準入力は 1 度しか読めないため、ファイルに受けて各 hook に渡し直す (git は入力の無い hook の標準入力を /dev/null にする)
+STDIN_FILE="$(mktemp)"
+trap 'rm -f "$STDIN_FILE"' EXIT
+cat >"$STDIN_FILE"
+for hook in "${HOOKS[@]}"; do
+  "$hook" "$@" <"$STDIN_FILE"
+  rc=$?
+  [ "$rc" -eq 0 ] || exit "$rc"
+done
+exit 0
