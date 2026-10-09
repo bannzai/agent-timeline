@@ -3,3 +3,5 @@ test-results
 tmp
 package-lock.json
 *.md
+# bannzai/castle から写した配布物 (SSOT は castle 側。整形し直すと配布元とずれる)
+.claude/
