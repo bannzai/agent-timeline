@@ -1,0 +1,142 @@
+#!/usr/bin/env bash
+#
+# rules-on-demand-index - frontmatter に `load: on-demand` を持つ rule の索引を JSON で出力する
+#
+# Claude Code が自動ロードしない `~/.claude/documents/rules/*.md` のうち、frontmatter に `load: on-demand` と
+# `when: <状況>` を書いた rule を、hook が `match:` (ツール呼び出しの ERE) の一致で必要になった時だけ注入する。
+# 同じディレクトリには skill 等の入口から参照される rule (frontmatter 無し) も同居するため、`load: on-demand` の有無で選別する。
+# 設計と採らなかった案: ~/.claude/documents/adr/0067-load-recoverable-rules-on-demand-by-jev-hook.md
+# (Jev の判定を外して正規表現だけにした決定: ~/.claude/documents/adr/0085-remove-jev-and-return-to-claude-native-hooks.md)
+#
+# この索引は次の 2 か所が同じ判定で使う (frontmatter の解釈をここ 1 か所に集める):
+#   - claude-hook-load-rules-on-demand (判定と注入)
+#   - codex-sessionstart-hook-inject-claude-rules (本文を注入せず一覧だけ出す)
+#
+# 使い方:
+#   rules-on-demand-index [<rules dir> ...]
+#     引数が無ければ $HOME/.claude/documents/rules を見る。サブディレクトリの .md も再帰的に対象にし、
+#     ディレクトリ symlink (~/.claude/documents は castle への symlink) も辿る
+#
+# 出力 (stdout): JSON 配列。name 順。要素は
+#   {"name": "<ファイル名から .md を除いたもの>", "path": "<絶対パス>",
+#    "when": "<状況>", "match": "<ERE または null>", "block": "<once または null>", "chars": <本文の文字数>}
+#   `load: on-demand` の rule が 1 つも無ければ []
+#
+# frontmatter の書式 (先頭行が --- で始まり次の --- で閉じる YAML。値は 1 行):
+#   ---
+#   load: on-demand
+#   when: <この rule を読むべき状況の 1 行説明。人が読む索引 (codex-sessionstart-hook-inject-claude-rules の一覧) に使う>
+#   match: '<ERE。PreToolUse (PostToolUseFailure / PermissionDenied) で `<tool 名>:<コマンド等>` に一致した時に注入する。
+#           省略した rule は hook から注入されない (入口は skill・常時ロードの rule からの参照にする)>'
+#   match の値は単引用符で囲む (二重引用符だと \b や \. が YAML の不正なエスケープになる)
+#   block: once  (任意。match に一致したツール呼び出しを、セッションで最初の 1 回だけ実行前に止めて本文を届ける。
+#                 コマンドを実行する前に読ませる必要がある rule に付ける。match が無い rule では効かない)
+#   ---
+#   `load: on-demand` があって `when` が無い rule は判定できないため索引に入れず、stderr に警告を出す
+#
+# キャッシュ: 結果を ${XDG_CACHE_HOME:-$HOME/.cache}/rules-on-demand-index/<ディレクトリ一覧のハッシュ>.json に置き、
+#   対象ディレクトリ配下の .md のパス一覧が同じ (追加・削除・改名・移動が無い)、.md がキャッシュより新しくない
+#   (変更が無い)、このスクリプト自体がキャッシュより新しくない、の 3 つが揃う限りキャッシュを出す。
+#   hook が毎ツール呼び出しで呼ぶため。RULES_ON_DEMAND_INDEX_NO_CACHE=1 で常に作り直す
+#
+# テスト方法:
+#   bash test-rules-on-demand-index.sh
+#
+# exit code: 0 (索引を出力した)、1 (引数のディレクトリが無い)
+# 冪等: 同じ入力には同じ索引を出す。副作用はキャッシュファイルの更新だけ
+# 依存: bash 3.2 以上、jq、awk、find、shasum
+set -uo pipefail
+
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  sed -n '3,32p' "$0"
+  exit 0
+fi
+
+command -v jq >/dev/null 2>&1 || { echo "Error: jq が見つかりません" >&2; exit 1; }
+
+if [ $# -eq 0 ]; then
+  set -- "$HOME/.claude/documents/rules"
+fi
+
+for dir in "$@"; do
+  if [ ! -d "$dir" ]; then
+    echo "Error: ディレクトリがありません: $dir" >&2
+    exit 1
+  fi
+done
+
+# キャッシュが有効 (対象の .md の数が同じで、キャッシュより新しい .md が無い) ならそれを出して終わる
+CACHE_DIR="${XDG_CACHE_HOME:-$HOME/.cache}/rules-on-demand-index"
+CACHE_FILE="$CACHE_DIR/$(printf '%s\n' "$@" | shasum -a 256 | cut -c1-16).json"
+# 対象の .md のパス一覧のハッシュ。改名・移動 (mv / git mv) は件数も mtime も変えないため、これで検出する
+paths_hash="$(find -L "$@" -type f -name '*.md' 2>/dev/null | sort | shasum -a 256 | cut -c1-16)"
+if [ "${RULES_ON_DEMAND_INDEX_NO_CACHE:-}" != "1" ] && [ -s "$CACHE_FILE" ]; then
+  newer="$(find -L "$@" -type f -name '*.md' -newer "$CACHE_FILE" 2>/dev/null | head -1)"
+  cached_hash="$(jq -r '.paths_hash // ""' "$CACHE_FILE" 2>/dev/null || true)"
+  # このスクリプト自体がキャッシュより新しい (索引の形が変わった可能性がある) 時も作り直す
+  if [ -z "$newer" ] && [ "$paths_hash" = "$cached_hash" ] && [ ! "$0" -nt "$CACHE_FILE" ]; then
+    jq '.index' "$CACHE_FILE" 2>/dev/null && exit 0
+  fi
+fi
+
+# frontmatter の指定キーの値 (1 行) を出力する。frontmatter が無い・キーが無いなら空
+frontmatter_value() {
+  local f="$1" key="$2"
+  head -1 "$f" | grep -q '^---$' || return 0
+  awk -v key="$key" '
+    NR == 1 { next }
+    /^---$/ { exit }
+    index($0, key ":") == 1 {
+      s = substr($0, length(key) + 2)
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+      gsub(/^["'"'"']|["'"'"']$/, "", s)
+      print s
+      exit
+    }
+  ' "$f"
+}
+
+# frontmatter を除いた本文の文字数
+body_chars() {
+  local f="$1"
+  if head -1 "$f" | grep -q '^---$'; then
+    awk 'NR == 1 { next } !done && /^---$/ { done = 1; next } done { print }' "$f" | wc -m | tr -d ' '
+  else
+    wc -m <"$f" | tr -d ' '
+  fi
+}
+
+entries=""
+for dir in "$@"; do
+  while IFS= read -r f; do
+    [ -f "$f" ] || continue
+    [ "$(frontmatter_value "$f" load)" = "on-demand" ] || continue
+    when="$(frontmatter_value "$f" when)"
+    if [ -z "$when" ]; then
+      echo "Warning: load: on-demand の rule に when: がありません。索引から外します: $f" >&2
+      continue
+    fi
+    name="$(basename "$f" .md)"
+    abs="$(cd "$(dirname "$f")" && pwd)/$(basename "$f")"
+    match="$(frontmatter_value "$f" match)"
+    block="$(frontmatter_value "$f" block)"
+    entry="$(jq -nc --arg name "$name" --arg path "$abs" --arg when "$when" --arg match "$match" --arg block "$block" --argjson chars "$(body_chars "$f")" \
+      '{name: $name, path: $path, when: $when, match: (if $match == "" then null else $match end), block: (if $block == "" then null else $block end), chars: $chars}')"
+    entries="$entries$entry"$'\n'
+  done < <(find -L "$dir" -type f -name '*.md' | sort)
+done
+
+index="$(printf '%s' "$entries" | jq -s 'sort_by(.name)')"
+# 一時ファイルはプロセスごとに分ける。hook は並列に動くため、共通の名前だと一方が mv した後も他方が同じ inode
+# (= 公開済みのキャッシュ) へ書き続け、読み手が空・書き込み途中のキャッシュを見る
+if mkdir -p "$CACHE_DIR" 2>/dev/null; then
+  cache_tmp="$CACHE_FILE.$$.tmp"
+  if jq -nc --argjson index "$index" --arg h "$paths_hash" '{paths_hash: $h, index: $index}' >"$cache_tmp" 2>/dev/null; then
+    mv "$cache_tmp" "$CACHE_FILE" 2>/dev/null || rm -f "$cache_tmp" 2>/dev/null
+  else
+    rm -f "$cache_tmp" 2>/dev/null
+  fi
+fi
+printf '%s\n' "$index"

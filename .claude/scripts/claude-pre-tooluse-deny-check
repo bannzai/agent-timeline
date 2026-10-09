@@ -1,0 +1,556 @@
+#!/bin/bash
+
+# ref: https://wasabeef.jp/blog/claude-code-secure-bash
+# TODO: CWDの.claude/settings.json,.claude/settings.local.jsonも読み込む
+# TODO: 別スクリプトで、denyを許可するのではなくて、allowのみのスクリプトを実行するようにしたい。これは設定を読むのはcwdのみで良い
+
+# JSON 入力を読み取り、コマンドとツール名を抽出
+input=$(cat)
+command=$(echo "$input" | jq -r '.tool_input.command' 2>/dev/null || echo "")
+tool_name=$(echo "$input" | jq -r '.tool_name' 2>/dev/null || echo "")
+
+# Bash コマンドのみをチェック
+if [ "$tool_name" != "Bash" ]; then
+  exit 0
+fi
+
+# settings.json から拒否パターンを読み取り
+settings_file="$HOME/.claude/settings.json"
+
+# Bash コマンドの全拒否パターンを取得
+deny_patterns=$(jq -r '.permissions.deny[] | select(startswith("Bash(")) | gsub("^Bash\\("; "") | gsub("\\)$"; "")' "$settings_file" 2>/dev/null)
+
+# コマンドが拒否パターンにマッチするかチェックする関数
+matches_deny_pattern() {
+  local cmd="$1"
+  local pattern="$2"
+
+  # 先頭・末尾の空白を削除
+  cmd="${cmd#"${cmd%%[![:space:]]*}"}" # 先頭の空白を削除
+  cmd="${cmd%"${cmd##*[![:space:]]}"}" # 末尾の空白を削除
+
+  # レガシー :* サフィックスを公式等価形式の " *" に変換
+  # ref: https://code.claude.com/docs/en/permissions
+  # "The legacy :* suffix syntax is equivalent to ' *' but is deprecated."
+  if [[ "$pattern" == *":*" ]]; then
+    pattern="${pattern%:*} *"
+  fi
+
+  # glob パターンマッチング（ワイルドカード対応）
+  [[ "$cmd" == $pattern ]]
+}
+
+# まずコマンド全体をチェック
+while IFS= read -r pattern; do
+  # 空行をスキップ
+  [ -z "$pattern" ] && continue
+
+  # コマンド全体がパターンにマッチするかチェック
+  if matches_deny_pattern "$command" "$pattern"; then
+    echo "Error: コマンドが拒否されました: '$command' (パターン: '$pattern')" >&2
+    exit 2
+  fi
+done <<<"$deny_patterns"
+
+# cat / tee (書き込み専用コマンド) の heredoc 本文はテキストであって実行されないため、
+# 分割チェックの対象から外す (本文中の "rm ..." 等の行への誤検知を防ぐ)。
+# 本文を検査対象から外す (skip する) のは次の 4 条件をすべて満たす場合だけにする:
+#   (a) heredoc を開始する行にパイプ・プロセス置換が無い
+#       … "cat <<'EOF' | bash" / "tee >(bash) <<'EOF'" は本文が後段のシェルで実行される
+#   (b) heredoc を受け取る単純コマンドの先頭語が cat / tee
+#       ("mkdir -p tmp && cat > f <<'EOF'" のように、行頭の語ではなく
+#        heredoc 演算子が属するセグメントの先頭語で判定する。セグメントの区切りには
+#        バックグラウンド実行の単一 & も含め、先頭の環境変数代入は読み飛ばす)
+#   (c) 区切り語が引用されている ("<<'EOF'" / '<<"EOF"' / "<<$'EOF'" / '<<$"EOF"')
+#       … 未引用の "<<EOF" は本文中のコマンド置換が実行されるため検査を維持する
+#   (d) 入力全体で cat / tee の解決先が変えられていない
+#       (force_check == 0。実行されるコマンド語がすべて解決先を変えないと確信できる語か、
+#        を呼び出し元の needs_force_check で判定する)
+#   (e) heredoc を開始する行にもその直前の行にも行継続 (行末のバックスラッシュ) が無い
+#       … 行継続で連結される行は 1 つの論理行になり、物理行単位の本文の対応付けが崩れる
+# heredoc 演算子の認識は引用状態を追跡し、引用外の "#" 以降 (行コメント)、
+# 引用文字列内の "<<"、算術展開・算術コマンド内の "<<" (シフト演算子) は
+# 演算子として扱わない (存在しない heredoc の追跡状態に入らない)。
+# 条件を満たさない heredoc も、終端行を正しく検出するために追跡だけは行い、本文は print する。
+# ここでの判断は迷ったら「除外しない (検査する)」側へ倒す (誤検知は不便だが、迂回は穴になる)
+# drop_delims=1 は、除外した heredoc の終端行も出力しない (再定義判定の入力を作る時に使う。
+# 終端行 "EOF" が単独のコマンドとして判定されてしまうのを防ぐ)
+strip_writer_heredoc_bodies() {
+  awk -v force_check="${1:-0}" -v drop_delims="${2:-0}" '
+    # 行内に (論理和の || ではない) パイプがあるか
+    function has_pipe(s,   i, n, c) {
+      n = length(s); i = 1
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (c == "|") {
+          if (substr(s, i + 1, 1) == "|") { i += 2; continue }
+          return 1
+        }
+        i++
+      }
+      return 0
+    }
+    # プロセス置換 (>(...) / <(...)) があるか。
+    # 出力先・入力元がサブシェルになり、heredoc 本文がそのシェルへ渡り得る。
+    # 引用状態は見ない (過剰検出は「除外しない」側なので安全)
+    function has_procsub(s) {
+      return (index(s, ">(") > 0 || index(s, "<(") > 0)
+    }
+    # 行末が奇数個のバックスラッシュ (行継続) で終わるか。
+    # 行継続で連結される行は 1 つの論理行になり、物理行だけを見た
+    # heredoc 本文の対応付け・先頭語判定が信用できなくなる
+    # (過剰検出は「除外しない」側なので安全)
+    function ends_continued(s) {
+      if (match(s, /\\+$/)) return (RLENGTH % 2 == 1)
+      return 0
+    }
+    # heredoc 演算子の位置 oppos より前で最後に現れる引用外の区切り (; && || 単一の &) 以降を
+    # 「heredoc を受け取る単純コマンド」とみなし、その先頭語を返す。
+    # 引用内の区切りで切ると、"bash -s \042; cat \042 <<..." のような入力で
+    # 先頭語を cat と誤認するため、引用状態を追跡する (st の意味は下の走査ループと同じ)。
+    # 単一の & もバックグラウンド実行のコマンド区切り ("cat /dev/null & bash <<..." では
+    # heredoc を受け取るのは後段の bash)。リダイレクトの "&>" と fd 複製の ">&" / "<&" は除く。
+    # 先頭の "NAME=value" 形式の環境変数代入のうち、コマンドの挙動を変え得ないものだけを
+    # 読み飛ばして実際のコマンド名を返す ("LC_ALL=C cat > f <<'EOF'" の先頭語を
+    # LC_ALL=C と誤認しないため)。allowlist 方式にするのは、LD_PRELOAD のように
+    # cat 自体に任意コードを実行させ得る代入を安全な writer として扱わないため
+    # (allowlist 外の代入は代入語をそのまま返し、cat / tee と一致しないので本文は検査される)。
+    # パラメータ展開 "${ }" ・コマンド置換 "$( )" / バッククォート・算術展開 "$(( ))" は
+    # 対応する閉じ記号をスタック (sp / stk) で追跡し、開始時の探索位置を sstk へ退避する。
+    # 展開の内部の ; & && || は内側のコマンドの区切りとして扱い、展開を抜けた時点で
+    # 外側の探索位置へ戻す。これにより
+    #   - "bash ${x/a/& cat } <<'EOF'" は外側の bash を返す (展開内の & で切らない)
+    #   - "cat $(true; bash <<'EOF' ...)" は heredoc が属する内側の bash を返す
+    # の両方が正しく判定できる
+    function head_word(s, oppos,   pre, i, n, c, nc, pc, st, start, seg, w, k, cnt, sp, stk, sstk) {
+      pre = substr(s, 1, oppos - 1)
+      n = length(pre); start = 1; i = 1; st = 0; sp = 0
+      while (i <= n) {
+        c = substr(pre, i, 1)
+        if (st == 1) { if (c == "\047") st = 0; i++; continue }
+        if (st == 3) {
+          if (c == "\\") { i += 2; continue }
+          if (c == "\047") st = 0
+          i++; continue
+        }
+        if (c == "\\") { i += 2; continue }
+        if (st == 0 && c == "$" && substr(pre, i + 1, 1) == "\047") { st = 3; i += 2; continue }
+        if (st == 0 && c == "\047") { st = 1; i++; continue }
+        if (c == "\042") { st = (st == 2) ? 0 : 2; i++; continue }
+        if (st != 0) { i++; continue }
+        # 展開の開始・終了を追跡する
+        if (c == "$" && substr(pre, i + 1, 1) == "{") {
+          sp++; stk[sp] = "}"; sstk[sp] = start; start = i + 2; i += 2; continue
+        }
+        if (c == "$" && substr(pre, i + 1, 1) == "(" && substr(pre, i + 2, 1) == "(") {
+          sp++; stk[sp] = ")"; sstk[sp] = start
+          sp++; stk[sp] = ")"; sstk[sp] = start
+          start = i + 3; i += 3; continue
+        }
+        if (c == "$" && substr(pre, i + 1, 1) == "(") {
+          sp++; stk[sp] = ")"; sstk[sp] = start; start = i + 2; i += 2; continue
+        }
+        if (c == "\140") {
+          if (sp > 0 && stk[sp] == "\140") { start = sstk[sp]; sp-- }
+          else { sp++; stk[sp] = "\140"; sstk[sp] = start; start = i + 1 }
+          i++; continue
+        }
+        if (sp > 0) {
+          # "${ }" の置換文字列に現れる "(" はリテラルで、対応する ")" を持たない。
+          # 積むと "}" で外側へ戻れなくなるため、コマンドが現れる文脈
+          # ("$( )" / バッククォート / "$(( ))" の内部) でだけ積む
+          if (c == "(" && stk[sp] != "}") {
+            sp++; stk[sp] = ")"; sstk[sp] = start; start = i + 1; i++; continue
+          }
+          if (c == stk[sp]) { start = sstk[sp]; sp--; i++; continue }
+        }
+        if (c == ";") { start = i + 1; i++; continue }
+        if (c == "&") {
+          if (substr(pre, i + 1, 1) == "&") { start = i + 2; i += 2; continue }
+          nc = substr(pre, i + 1, 1)
+          pc = (i == 1) ? "" : substr(pre, i - 1, 1)
+          # ">&" / "<&" は fd 複製、"&>" はリダイレクト。
+          # ";&" / ";;&" は case 句の終端子で、後に続くのはコマンドではなくパターン。
+          # "|&" はパイプの一部 (パイプがある行はそもそも本文を除外しない)
+          if (nc == ">" || pc == ">" || pc == "<" || pc == ";" || pc == "|") { i++; continue }
+          start = i + 1; i++; continue
+        }
+        if (c == "|" && substr(pre, i + 1, 1) == "|") { start = i + 2; i += 2; continue }
+        i++
+      }
+      seg = substr(pre, start)
+      sub(/^[ \t]+/, "", seg)
+      # 単純コマンドとして信用できない構文が残っている区間では writer と判定しない。
+      # 展開・部分文字列・パターン・エスケープを含む区間は、Bash の語の切れ目や
+      # 制御演算子の意味 (旧式算術展開 "$[ ]" ・extglob の "@( )" 内の & 等) を
+      # ここでの走査だけでは決められないため、除外しない側へ倒す
+      if (index(seg, "$") || index(seg, "\140") || index(seg, "(") || index(seg, ")") ||
+          index(seg, "{") || index(seg, "}") || index(seg, "[") || index(seg, "]") ||
+          index(seg, "\\")) return ""
+      cnt = split(seg, w, /[ \t]+/)
+      for (k = 1; k <= cnt; k++) {
+        if (w[k] == "") continue
+        # ロケール・端末表示に限った代入だけを読み飛ばす。それ以外の代入
+        # (LD_PRELOAD / DYLD_INSERT_LIBRARIES / BASH_ENV / IFS 等) は
+        # cat 自体の挙動を変え得るため、代入語をそのまま先頭語として返す。
+        # 引用・エスケープ・展開を含む語は読み飛ばさない。ここでの語の分割は空白のみを見るため、
+        # "LC_ALL=x\ cat bash" (エスケープ空白) や "LC_ALL=$(echo cat x) bash" (展開内の空白)
+        # では分割結果の語と Bash の語が一致しない。
+        # その語をそのまま返せば cat / tee と一致せず本文は検査される
+        if (index(w[k], "\047") == 0 && index(w[k], "\042") == 0 && index(w[k], "\\") == 0 &&
+            index(w[k], "$") == 0 && index(w[k], "\140") == 0 &&
+            w[k] ~ /^(LC_[A-Z_]*|LANG|LANGUAGE|TZ|TERM|COLUMNS|LINES|NO_COLOR|CLICOLOR|CLICOLOR_FORCE)=/) continue
+        return w[k]
+      }
+      return ""
+    }
+    # 位置 p から区切り語を 1 語読む。引用の有無 (D_quoted) と次位置 (D_next) も返す。
+    # ハイフン・ドット等を含む語 (END-OF-FILE 等) を最後まで読み切る。
+    # ANSI-C 引用 "$'EOF'" とロケール翻訳 '$"EOF"' の先頭の $ は Bash の quote removal で
+    # 消えるため区切り語に含めない (含めると実際の終端 EOF を検出できず、
+    # 終端後のコマンドまで本文として除外してしまう)
+    function read_delim(s, p,   n, c, q, qend, nc) {
+      n = length(s); D_delim = ""; D_quoted = 0
+      while (p <= n) {
+        c = substr(s, p, 1)
+        if (c == " " || c == "\t" || c == ";" || c == "&" || c == "|" || c == "<" || c == ">" || c == "(" || c == ")") break
+        if (c == "$") {
+          nc = substr(s, p + 1, 1)
+          if (nc == "\047" || nc == "\042") { p++; continue }
+        }
+        if (c == "\047" || c == "\042") {
+          q = c
+          qend = index(substr(s, p + 1), q)
+          D_quoted = 1
+          if (qend == 0) { D_delim = D_delim substr(s, p + 1); p = n + 1; break }
+          D_delim = D_delim substr(s, p + 1, qend - 1)
+          p = p + qend + 1
+          continue
+        }
+        if (c == "\\") {
+          D_quoted = 1; p++
+          if (p <= n) { D_delim = D_delim substr(s, p, 1); p++ }
+          continue
+        }
+        D_delim = D_delim c
+        p++
+      }
+      D_next = p
+      return D_delim
+    }
+    BEGIN { hh = 1; ht = 0; prev_cont = 0 }
+    {
+      # heredoc 本文中: 終端行の検出だけを行い、新しい heredoc の解析はしない
+      if (hh <= ht) {
+        stripped = $0
+        if (hq_dash[hh]) sub(/^\t+/, "", stripped)
+        if (stripped == hq_delim[hh]) {
+          if (drop_delims && hq_skip[hh]) { hh++; next }
+          hh++; print; next
+        }
+        if (hq_skip[hh]) next
+        print
+        next
+      }
+      line = $0
+      cont = ends_continued(line)
+      i = 1; n = length(line); st = 0; arith = 0
+      # st: 0=引用外, 1=シングルクォート内, 2=ダブルクォート内,
+      #     3=$ 付きシングルクォート (ANSI-C 引用) 内。3 ではバックスラッシュが次の文字を退避する
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (st == 1) { if (c == "\047") st = 0; i++; continue }
+        if (st == 3) {
+          if (c == "\\") { i += 2; continue }
+          if (c == "\047") st = 0
+          i++; continue
+        }
+        if (c == "\\") { i += 2; continue }
+        if (st == 0 && c == "$" && substr(line, i + 1, 1) == "\047") { st = 3; i += 2; continue }
+        if (st == 0 && c == "\047") { st = 1; i++; continue }
+        if (c == "\042") { st = (st == 2) ? 0 : 2; i++; continue }
+        if (st != 0) { i++; continue }
+        # 算術展開 "$(( ))" ・算術コマンド "(( ))" の内部では "<<" はシフト演算子であって
+        # heredoc 演算子ではない (存在しない heredoc を追跡すると、以降の行が
+        # 本文として除外され続ける)。括弧の対応で終端を判定し、内部では演算子を認識しない。
+        # 部分式の "( )" も arith で数えるため入れ子は正しく閉じる。
+        # 実際にはサブシェル "( (cmd) )" だった場合は heredoc を追跡しないだけなので、
+        # 本文は検査対象に残る (「除外しない」側で安全)
+        if (arith > 0) {
+          if (c == "(") arith++
+          else if (c == ")") arith--
+          i++; continue
+        }
+        if (c == "$" && substr(line, i + 1, 1) == "(" && substr(line, i + 2, 1) == "(") {
+          arith = 2; i += 3; continue
+        }
+        if (c == "(" && substr(line, i + 1, 1) == "(") { arith = 2; i += 2; continue }
+        # 引用外の # 以降は行コメント。以降に heredoc 演算子は現れない
+        if (c == "#") {
+          prevc = (i == 1) ? "" : substr(line, i - 1, 1)
+          if (i == 1 || prevc == " " || prevc == "\t" || prevc == ";" ||
+              prevc == "&" || prevc == "|" || prevc == "(" || prevc == ")") break
+          i++; continue
+        }
+        if (c != "<" || substr(line, i + 1, 1) != "<") { i++; continue }
+        # here-string (<<<) は heredoc ではない
+        if (substr(line, i + 2, 1) == "<") { i += 3; continue }
+        p = i + 2
+        dash = 0
+        if (substr(line, p, 1) == "-") { dash = 1; p++ }
+        while (substr(line, p, 1) == " " || substr(line, p, 1) == "\t") p++
+        read_delim(line, p)
+        if (D_delim == "") { i = p; continue }
+        ht++
+        hq_delim[ht] = D_delim
+        hq_dash[ht] = dash
+        hw = head_word(line, i)
+        # 1 行に複数の heredoc がある場合も、本文は宣言順に現れるため
+        # キューの各要素ごとに独立して skip を判定する
+        hq_skip[ht] = (force_check == 0 && cont == 0 && prev_cont == 0 &&
+                       has_pipe(line) == 0 && has_procsub(line) == 0 &&
+                       D_quoted == 1 && (hw == "cat" || hw == "tee")) ? 1 : 0
+        i = D_next
+      }
+      prev_cont = cont
+      print
+    }
+  '
+}
+
+# コマンドを論理演算子 (; && ||) とコマンド置換 ($( と `) で分割し、各部分もチェックする
+# (パイプ | と単一 & は分割しない)。
+# 1 行目だけは行頭が必ず引用外であることが保証されるため引用状態を追跡し、
+# シングルクォート内 (ANSI-C 引用の $ 付きシングルクォートを含む) の区切りでは分割しない
+# (シングルクォートで囲んだコマンド置換表記を printf に渡すだけ、のような入力の誤検知を防ぐ)。
+# 2 行目以降は行頭の引用状態を確定できず、引用の誤判定は検査漏れ (迂回) になるため、
+# 従来どおり引用を無視して機械的に分割する。
+# ダブルクォート内のコマンド置換は実際に展開されるため、引用追跡中も分割対象に残す
+split_shell_operators() {
+  awk '
+    # st: 0=引用外, 1=シングルクォート内, 2=ダブルクォート内,
+    #     3=$ 付きシングルクォート (ANSI-C 引用) 内。3 ではバックスラッシュが次の文字を退避する
+    function split_line(line,   out, n, i, c, st) {
+      out = ""; n = length(line); i = 1; st = 0
+      while (i <= n) {
+        c = substr(line, i, 1)
+        if (st == 1) { if (c == "\047") st = 0; out = out c; i++; continue }
+        if (st == 3) {
+          if (c == "\\") { out = out substr(line, i, 2); i += 2; continue }
+          if (c == "\047") st = 0
+          out = out c; i++; continue
+        }
+        if (c == "\\") { out = out substr(line, i, 2); i += 2; continue }
+        if (st == 0 && c == "$" && substr(line, i + 1, 1) == "\047") {
+          st = 3; out = out substr(line, i, 2); i += 2; continue
+        }
+        if (st == 0 && c == "\047") { st = 1; out = out c; i++; continue }
+        if (c == "\042") { st = (st == 2) ? 0 : 2; out = out c; i++; continue }
+        # ここから下は st == 0 (引用外) か st == 2 (ダブルクォート内) のみ
+        if (c == ";") { out = out "\n"; i++; continue }
+        if (c == "&" && substr(line, i + 1, 1) == "&") { out = out "\n"; i += 2; continue }
+        if (c == "|" && substr(line, i + 1, 1) == "|") { out = out "\n"; i += 2; continue }
+        if (c == "$" && substr(line, i + 1, 1) == "(") { out = out "\n"; i += 2; continue }
+        if (c == "\140") { out = out "\n"; i++; continue }
+        out = out c; i++
+      }
+      return out
+    }
+    NR == 1 { print split_line($0); next }
+    {
+      gsub(/;/, "\n")
+      gsub(/&&/, "\n")
+      gsub(/\|\|/, "\n")
+      gsub(/\$\(/, "\n")
+      gsub("\140", "\n")
+      print
+    }
+  '
+}
+
+# 入力に cat / tee の解決先を変え得る操作が含まれていないかを判定する。
+# 含まれていれば heredoc 本文の除外を全面的に無効にする (force_check=1)。
+#
+# 危険な構文 (eval / source / PATH 代入 / 関数・alias 定義 …) を列挙して探す方式は、
+# 引用・エスケープ・展開で綴りを割られると成立しない
+# ("ev\al" ・"e${x}al" ・"'c''at() { … }'" はいずれもシェルでは eval / cat の定義)。
+# そこで列挙をやめ、**実行されるコマンド語がすべて「解決先を変えないと確信できる語」である**
+# ことを要求する。1 語でも判定できなければ force_check=1 (除外しない側) に倒す。
+#
+# 判定は簡単なコマンド単位で行い、各コマンドの先頭語 (先頭の代入語とシェルキーワードを
+# 読み飛ばした語) だけを見る。文字列引数の中の "eval" を実行とみなさないため
+# ("printf 'eval x'" は eval を実行しない)。
+# 語は引用・エスケープを外した綴りで判定し、外した後にも展開・部分文字列・パターンの文字が
+# 残る語 (綴りを静的に決められない語) は force_check=1 とする。
+needs_force_check() {
+  awk '
+    # 引用・エスケープを外し、シェルが解釈する綴りへ正規化する
+    function normalize(s,   out, n, i, c, st) {
+      out = ""; n = length(s); i = 1; st = 0
+      while (i <= n) {
+        c = substr(s, i, 1)
+        if (st == 1) { if (c == "\047") { st = 0; i++; continue } out = out c; i++; continue }
+        if (st == 3) {
+          if (c == "\\") { out = out substr(s, i + 1, 1); i += 2; continue }
+          if (c == "\047") { st = 0; i++; continue }
+          out = out c; i++; continue
+        }
+        if (c == "\\") { out = out substr(s, i + 1, 1); i += 2; continue }
+        if (st == 0 && c == "$" && substr(s, i + 1, 1) == "\047") { st = 3; i += 2; continue }
+        if (st == 0 && c == "\047") { st = 1; i++; continue }
+        if (c == "\042") { st = (st == 2) ? 0 : 2; i++; continue }
+        out = out c; i++
+      }
+      return out
+    }
+    # 引数の位置にだけ現れてよい無害な展開 (パラメータ展開・算術展開・変数参照) を取り除く。
+    # 引数はコマンド解決を変えないため、これらが残っていても判定不能にはしない。
+    # 内部にコマンド置換・バッククォートを含む形は取り除かず、判定不能として扱う
+    function strip_harmless_expansions(s,   prev) {
+      do {
+        prev = s
+        gsub(/\$\(\([^()$`=]*\)\)/, "", s)
+        gsub(/\$\{[^{}$`=]*\}/, "", s)
+        gsub(/\$[A-Za-z_][A-Za-z0-9_]*/, "", s)
+        gsub(/\$[0-9?#@*$!-]/, "", s)
+      } while (s != prev)
+      return s
+    }
+    # 綴りを静的に決められない語 (展開・部分文字列・パターン・関数定義の括弧を含む)
+    function unresolvable(w) {
+      return (index(w, "$") || index(w, "\140") || index(w, "(") || index(w, ")") ||
+              index(w, "{") || index(w, "}") || index(w, "[") || index(w, "]"))
+    }
+    # 1 つの簡単なコマンドを見て、cat / tee の解決先を変え得るなら 1 を返す。
+    # 先頭語だけでなく全語を見る。関数定義は "cat () { … }" のように語が割れる形も、
+    # コマンド置換・グループは引数の位置にも現れるため、綴りを静的に決められない語が
+    # 1 つでもあれば判定できないものとして 1 を返す
+    function risky_segment(seg,   cnt, w, k, word, cmdfound, cmdword, skipnext) {
+      sub(/^[ \t]+/, "", seg)
+      cnt = split(seg, w, /[ \t]+/)
+      cmdfound = 0; cmdword = ""; skipnext = 0
+      for (k = 1; k <= cnt; k++) {
+        if (w[k] == "") continue
+        word = normalize(w[k])
+        # 直前のコマンド置換・グループを閉じるだけの語はコマンドではない
+        if (word ~ /^[)}]+$/ && cmdfound) continue
+        # コマンド名・代入・リダイレクトの位置では綴りを厳密に決められる必要がある。
+        # 引数の位置では無害な展開を取り除いてから判定する
+        if (unresolvable(cmdfound ? strip_harmless_expansions(word) : word)) return 1
+        if (skipnext) { skipnext = 0; continue }
+        if (!cmdfound) {
+          # 先頭の代入 ("NAME=value" と追記の "NAME+=value")。
+          # ロケール・端末表示に限った変数だけを解決先に影響しないとみなす
+          if (word ~ /^[A-Za-z_][A-Za-z0-9_]*\+?=/) {
+            if (word ~ /^(LC_[A-Z_]*|LANG|LANGUAGE|TZ|TERM|COLUMNS|LINES|NO_COLOR|CLICOLOR|CLICOLOR_FORCE)=/) continue
+            return 1
+          }
+          # 単純コマンドの先頭に置けるリダイレクト。演算子だけの語なら次の語が対象
+          if (word ~ /^[0-9]*[<>]/) {
+            if (word ~ /^[0-9]*[<>]+$/) skipnext = 1
+            continue
+          }
+          # 複合コマンドのキーワードは読み飛ばし、後続の語をコマンド名として見る
+          if (word ~ /^(if|then|else|elif|fi|for|while|until|do|done|case|esac|in|select|time|coproc|!)$/) continue
+          cmdfound = 1; cmdword = word
+          # 危険なコマンドを列挙するのではなく、無害と確信できるコマンドだけを許可する。
+          # 列挙方式は綴りを割る形 (行継続の "ev\" + "al" ・glob の "e*") や
+          # 未知のラッパー・インタプリタを取りこぼす。ここに無い語はすべて判定不能として
+          # force_check=1 に倒す (誤検知は本文の検査に戻るだけで、迂回にはならない)。
+          # 許可するのは、コマンド解決・環境・カレントディレクトリを変えず、
+          # 実行可能ファイルを作らず、書き出したファイルを実行しないコマンドに限る
+          if (word ~ /^(cat|tee|echo|printf|true|false|mkdir|ls|pwd|date|basename|dirname)$/) continue
+          return 1
+        }
+        # printf -v は引数で指定したシェル変数を書き換える。
+        # 展開でオプションを組み立てる形 ("printf -${TERM} PATH /tmp") も判定できないため、
+        # "-" で始まる引数は綴りを問わず対象にする
+        if (cmdword == "printf" && word ~ /^-/) return 1
+      }
+      return 0
+    }
+    # 引用外の ; & | で簡単なコマンドへ分割する。
+    # 分割し過ぎても検査対象の先頭語が増えるだけで、見落とし (検出漏れ) にはならない。
+    # 引用外の "#" 以降は行コメントで実行されないため判定対象から外す。
+    # 引用が行をまたいで閉じていない場合、以降の行の引用状態を物理行単位では決められないため、
+    # 判定不能として force_check=1 に倒す
+    {
+      n = length($0); i = 1; st = 0; start = 1
+      while (i <= n) {
+        c = substr($0, i, 1)
+        if (st == 0 && c == "#") {
+          prevc = (i == 1) ? "" : substr($0, i - 1, 1)
+          if (i == 1 || prevc == " " || prevc == "\t" || prevc == ";" ||
+              prevc == "&" || prevc == "|" || prevc == "(" || prevc == ")") {
+            n = i - 1
+            break
+          }
+        }
+        if (st == 1) { if (c == "\047") st = 0; i++; continue }
+        if (st == 3) {
+          if (c == "\\") { i += 2; continue }
+          if (c == "\047") st = 0
+          i++; continue
+        }
+        if (c == "\\") { i += 2; continue }
+        if (st == 0 && c == "$" && substr($0, i + 1, 1) == "\047") { st = 3; i += 2; continue }
+        if (st == 0 && c == "\047") { st = 1; i++; continue }
+        if (c == "\042") { st = (st == 2) ? 0 : 2; i++; continue }
+        if (st != 0) { i++; continue }
+        if (c == "&" && (substr($0, i + 1, 1) == ">" ||
+                         (i > 1 && (substr($0, i - 1, 1) == ">" || substr($0, i - 1, 1) == "<")))) {
+          # ">&" / "<&" は fd 複製、"&>" はリダイレクトでコマンドの区切りではない
+          i++; continue
+        }
+        if (c == ";" || c == "&" || c == "|") {
+          if (risky_segment(substr($0, start, i - start))) { flag = 1; exit }
+          start = i + 1
+        }
+        i++
+      }
+      if (risky_segment(substr($0, start, n - start + 1))) { flag = 1; exit }
+      if (st != 0) { flag = 1; exit }
+    }
+    END { exit (flag ? 0 : 1) }
+  '
+}
+
+# 判定は実行される部分だけを対象にする。引用済み writer heredoc の本文はテキストであって
+# 実行されないため、本文に "PATH=" や "eval" があるだけで除外が無効になると
+# ("cat > f <<'EOF'" でスクリプトを書き出す本来の用途で) 誤検知が再発する。
+# 本文を外すには heredoc の解析が要るため、まず force_check=0 で本文を落とした結果を
+# 判定対象にし、その判定を最終的な除外に使う (解決先を変え得る操作があれば本文は検査される)。
+# "<<" を含まない入力に heredoc は存在せず、本文の除外も force_check も結果を変えないため、
+# 走査を丸ごと省く (この hook は Bash ツールの実行ごとに走るため、大半の入力での固定費を避ける)
+if [[ "$command" == *"<<"* ]]; then
+  force_check=0
+  if printf '%s\n' "$command" | strip_writer_heredoc_bodies 0 1 | needs_force_check; then
+    force_check=1
+  fi
+  checkable_command=$(printf '%s\n' "$command" | strip_writer_heredoc_bodies "$force_check")
+else
+  checkable_command=$command
+fi
+temp_command=$(printf '%s\n' "$checkable_command" | split_shell_operators)
+
+IFS=$'\n'
+for cmd_part in $temp_command; do
+  # 空の部分をスキップ
+  [ -z "$(echo "$cmd_part" | tr -d '[:space:]')" ] && continue
+
+  # 各拒否パターンに対してチェック
+  while IFS= read -r pattern; do
+    # 空行をスキップ
+    [ -z "$pattern" ] && continue
+
+    # このコマンド部分がパターンにマッチするかチェック
+    if matches_deny_pattern "$cmd_part" "$pattern"; then
+      echo "Error: コマンドが拒否されました: '$cmd_part' (パターン: '$pattern')" >&2
+      exit 2
+    fi
+  done <<<"$deny_patterns"
+done
+
+# コマンドを許可
+exit 0
+

@@ -1,0 +1,392 @@
+#!/usr/bin/env python3
+"""claude-pretooluse-hook-git-hook-bypass-guard
+
+agent (Claude Code・Codex・pi) の Bash のうち、git の hook を飛ばしてコミット・push するものを実行の前に止める PreToolUse hook。
+git のグローバル hook (~/.claude/hooks/git/。個人情報の検査) を agent が回避できないようにするため
+(起票元: https://github.com/bannzai/castle/issues/1496 )。
+
+止めるもの (git commit・git merge・git push。user の alias (例: `c = commit`) は cwd の git config に、コマンドの
+-C・-c を付けて読んで展開し、同じに扱う):
+  - commit の --no-verify と -n (-nm "msg"・-anm のような短いオプションの連結を含む)
+  - merge・push の --no-verify (merge・push の -n は --no-stat・--dry-run で hook を飛ばさないため止めない)
+  - --no-verify の省略形 (--no-veri 以上。git は一意に決まる省略を受け付ける。--no-ver は --no-verbose と曖昧で git が拒む。
+    git 2.51.1 で実測)
+  - hook のディレクトリを差し替える `git -c core.hooksPath=<...>`・`--config-env core.hooksPath=<...>` と、コマンドの前の
+    GIT_CONFIG_PARAMETERS・GIT_CONFIG_KEY_<n> での core.hooksPath (キーは大文字小文字を区別しない)、core.hooksPath を書いた
+    ~/.gitconfig を読ませなくするコマンドの前の GIT_CONFIG_GLOBAL・HOME と env -i・env -u HOME、検査スクリプトを差し替える
+    CASTLE_GIT_HOOK_CHECK_LEAKS
+  どれも `-m "fix -n handling"` のような引用の中の文字列、-m・-F 等の値、heredoc の本文には反応しない (引用を区別して
+  語と演算子に分けて読む)。
+
+人が端末で直接打つコマンドは PreToolUse を通らないため止めない。
+
+使い方: settings.json の hooks.PreToolUse の "matcher":"Bash" と Codex の hooks.json の "^Bash$" に登録する。
+  標準入力から JSON (tool_name, tool_input.command, cwd) を受け取る
+Exit: 0=許可 2=止める (標準エラーに理由と代わりの手順)
+冪等: 読み取り (alias の解決に git config を読む) だけで副作用が無い
+
+既知の制限 (止めないもの):
+  - シェルの変数展開・コマンド置換で組み立てたコマンド ($CMD・$(...)) と、スクリプトファイル (bash x.sh) の中身
+  - `git config core.hooksPath <...>` での設定の書き換えと、export した GIT_CONFIG_*・HOME 環境変数
+  - Jev の層だけを外す環境変数 (JEV_ASK・TYPESAFE_API_KEY の差し替え。電話番号・secret の正規表現の検査は残る)
+  - commit-msg を実行しない操作 (cherry-pick・rebase・am で作るコミット)
+  - 構文を読めないコマンド (引用の対応が取れない等) は空白で分けた語で判定する (止める側に倒れる)
+"""
+
+import json
+import os
+import re
+import shlex
+import subprocess
+import sys
+
+GUIDE = """BLOCKED: git の hook を飛ばすコミット・push は禁止です ({reason})。
+git のグローバル hook (~/.claude/hooks/git/) が個人情報・secret の検査と各リポジトリの hook を実行します。
+次の手順で進めてください:
+  1. --no-verify / -n / core.hooksPath の差し替えを外して、通常の git commit / git push をやり直す
+  2. hook に止められたら、出力された検出の位置の実物を読み、本物の疑いがあれば取り除いてからやり直す
+  3. 誤検知・プレースホルダと判断した時は、hook が出す CASTLE_LEAK_CHECK_ACK=<値> を付けてやり直す
+     (扱いの SSOT: ~/.claude/rules/no-personal-info-in-repositories.md)"""
+
+# hook を実行するコミット・push の subcommand
+HOOKED_SUBCOMMANDS = ("commit", "merge", "push")
+# --no-verify の省略形として git が受け付ける最短の長さ (--no-veri。--no-ver は --no-verbose と曖昧)
+NO_VERIFY_MIN_PREFIX = len("--no-veri")
+# git の global option のうち、次の語を値に取るもの
+GIT_OPTIONS_WITH_VALUE = ("-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env", "--attr-source")
+# git commit の短いオプションのうち値を取るもの (連結の中では残りの文字、末尾なら次の語が値)
+COMMIT_SHORT_WITH_VALUE = "mFCct"
+# git commit の短いオプションのうち値を連結でだけ取るもの (-S<keyid>・-u<mode>)
+COMMIT_SHORT_OPTIONAL_VALUE = "Su"
+# 値を次の語に取る長いオプション (--opt=value の形は 1 語なので含めない)
+LONG_OPTIONS_WITH_VALUE = {
+    "commit": ("--message", "--file", "--reuse-message", "--reedit-message", "--fixup", "--squash", "--author",
+               "--date", "--template", "--cleanup", "--trailer", "--pathspec-from-file"),
+    "merge": ("--message", "--file", "--strategy", "--strategy-option", "--cleanup", "--into-name"),
+    "push": ("--repo", "--receive-pack", "--exec", "--push-option"),
+}
+SHORT_OPTIONS_WITH_VALUE = {"merge": "msFX", "push": "o"}
+# コマンドの前に付けて別のコマンドを実行するもの (後ろの語をコマンドとして読む)
+WRAPPERS = ("env", "command", "builtin", "exec", "nohup", "time", "nice", "sudo", "xargs", "timeout")
+SHELLS = ("sh", "bash", "zsh")
+# 単純コマンドの前に来るシェルの予約語 (if true; then git commit ...; fi の then の後ろ等をコマンドとして読む)
+SHELL_KEYWORDS = ("if", "then", "else", "elif", "do", "while", "until", "!", "{", "}", "fi", "done")
+# alias の展開・入れ子のシェルの上限 (alias が alias を指す循環で止まらないため。git 自身も循環を検出して止める)。
+# 実際の alias の連鎖と bash -c の入れ子は 1〜2 段で、10 段あれば実在の形は全部読み切れる
+MAX_ALIAS_DEPTH = 10
+# alias を読む git config の timeout 秒 (git config の読み取りは通常数十 ms。ロック待ち等で詰まっても PreToolUse を長く止めないため)
+GIT_CONFIG_TIMEOUT_SEC = 5
+
+
+def is_hookspath_key(key: str) -> bool:
+    """git config のキーが core.hooksPath か (section と key は大文字小文字を区別しない)。"""
+    return key.strip().lower() == "core.hookspath"
+
+
+def is_no_verify(word: str) -> bool:
+    """語が --no-verify かその省略形か。"""
+    return len(word) >= NO_VERIFY_MIN_PREFIX and "--no-verify".startswith(word)
+
+
+def split_words(text: str) -> list:
+    """text をシェルの語に分ける。引用の対応が取れない時は空白で分ける (読めない形を通さず、止める側で判定するため)。"""
+    try:
+        return shlex.split(text)
+    except ValueError:
+        return text.split()
+
+
+def shell_tokens(text: str) -> list:
+    """シェルの文字列を (種類, 文字列) の列にする。種類は word (引用を外した語)・op (; & | ( ) と改行)・
+    redirect (< > を含む演算子)。引用の中の演算子の文字は語の一部にする。引用の外の `<<` (here-string の `<<<` を除く)
+    の heredoc は、本文の行 (データで、その中の `git commit -n` 等の文字列はコマンドではない) を読み飛ばす。
+    引用の対応が取れない時は ValueError。"""
+    tokens = []
+    word, in_word = [], False
+    # 今の語に引用・\ による退避が含まれるか (含む語はファイル記述子の番号として読まない)
+    word_quoted = False
+    index = 0
+    # heredoc の区切り語を待っている時の <<- の有無 (None は待っていない)
+    awaiting_delimiter = None
+    # 次の改行の後に読み飛ばす heredoc の (区切り語, <<- か)
+    pending_heredocs = []
+
+    def end_word():
+        nonlocal word, in_word, word_quoted, awaiting_delimiter
+        if in_word:
+            text_word = "".join(word)
+            if awaiting_delimiter is not None:
+                pending_heredocs.append((text_word, awaiting_delimiter))
+                awaiting_delimiter = None
+            tokens.append(("word", text_word))
+        word, in_word, word_quoted = [], False, False
+
+    def skip_heredoc_bodies(start: int) -> int:
+        """start (改行の直後) から、待っている heredoc の本文と終端の行を読み飛ばした位置を返す。"""
+        position = start
+        for delimiter, strip_tabs in pending_heredocs:
+            while position < len(text):
+                newline = text.find("\n", position)
+                line_end = len(text) if newline < 0 else newline
+                line = text[position:line_end]
+                position = line_end + 1
+                if (line.lstrip("\t") if strip_tabs else line) == delimiter:
+                    break
+        pending_heredocs.clear()
+        return min(position, len(text))
+
+    while index < len(text):
+        char = text[index]
+        if char == "'":
+            closing = text.find("'", index + 1)
+            if closing < 0:
+                raise ValueError("unterminated single quote")
+            word.append(text[index + 1:closing])
+            in_word = word_quoted = True
+            index = closing + 1
+        elif char == '"':
+            index += 1
+            while index < len(text) and text[index] != '"':
+                if text[index] == "\\" and index + 1 < len(text) and text[index + 1] in '"\\$`\n':
+                    index += 1
+                word.append(text[index])
+                index += 1
+            if index >= len(text):
+                raise ValueError("unterminated double quote")
+            in_word = word_quoted = True
+            index += 1
+        elif char == "\\":
+            if index + 1 < len(text) and text[index + 1] != "\n":
+                word.append(text[index + 1])
+                in_word = word_quoted = True
+            index += 2
+        elif char in " \t\r":
+            end_word()
+            index += 1
+        elif char == "#" and not in_word:
+            newline = text.find("\n", index)
+            index = len(text) if newline < 0 else newline
+        elif char == "\n":
+            end_word()
+            tokens.append(("op", "\n"))
+            index = skip_heredoc_bodies(index + 1) if pending_heredocs else index + 1
+        elif char in ";&|()<>":
+            if char in "<>" and in_word and not word_quoted and "".join(word).isdigit():
+                # 2>/dev/null の 2 のような、リダイレクトの直前のファイル記述子の番号は語ではなくリダイレクトの一部
+                word, in_word, word_quoted = [], False, False
+            end_word()
+            end = index
+            while end < len(text) and text[end] in ";&|()<>":
+                end += 1
+            operator = text[index:end]
+            if set(operator) & set("<>"):
+                tokens.append(("redirect", operator))
+                if "<<" in operator and "<<<" not in operator:
+                    awaiting_delimiter = text[end:end + 1] == "-"
+                    if awaiting_delimiter:
+                        end += 1
+            else:
+                tokens.append(("op", operator))
+            index = end
+        else:
+            word.append(char)
+            in_word = True
+            index += 1
+    end_word()
+    return tokens
+
+
+def split_simple_commands(command: str) -> list:
+    """コマンド文字列を単純コマンドの語の列に分ける。構文を読めない時は空白で分けた語を 1 つのコマンドとして返す。"""
+    try:
+        tokens = shell_tokens(command)
+    except ValueError:
+        return [command.split()]
+    commands, current = [], []
+    skip_redirect_target = False
+    for kind, token in tokens:
+        if kind == "redirect":
+            # リダイレクト (>, 2>&1 の >&, &> 等) は区切りではなく、直後の語 (リダイレクト先) ごと読み飛ばす
+            skip_redirect_target = True
+        elif kind == "op":
+            if current:
+                commands.append(current)
+            current = []
+        elif skip_redirect_target:
+            skip_redirect_target = False
+        else:
+            current.append(token)
+    if current:
+        commands.append(current)
+    return commands
+
+
+def env_assignment_overrides_hookspath(word: str) -> bool:
+    """コマンドの前の VAR=value が core.hooksPath を差し替えるか。GIT_CONFIG_PARAMETERS・GIT_CONFIG_KEY_<n> での設定と、
+    core.hooksPath を書いた ~/.gitconfig を読ませなくする GIT_CONFIG_GLOBAL・HOME の差し替え、castle-git-hook の
+    検査スクリプトを差し替える CASTLE_GIT_HOOK_CHECK_LEAKS (テスト用で、agent のコミットで使う理由が無い) を数える。"""
+    name, _, value = word.partition("=")
+    if name in ("GIT_CONFIG_GLOBAL", "HOME", "CASTLE_GIT_HOOK_CHECK_LEAKS"):
+        return True
+    if name == "GIT_CONFIG_PARAMETERS":
+        return "core.hookspath" in value.lower()
+    return bool(re.fullmatch(r"GIT_CONFIG_KEY_\d+", name)) and is_hookspath_key(value)
+
+
+def env_option_clears_environment(word: str) -> bool:
+    """env のオプションが環境を空にするか HOME を消すか (-i・-・--ignore-environment、i を含む短いオプションの連結、
+    -uHOME・--unset=HOME。値を分けた -u HOME の HOME は env_assignment_overrides_hookspath が数える)。
+    HOME が消えて core.hooksPath を書いた ~/.gitconfig が読まれなくなるため。"""
+    return (word in ("-", "--ignore-environment") or bool(re.fullmatch(r"-[A-Za-z]*i[A-Za-z]*", word))
+            or bool(re.fullmatch(r"(-u|--unset=)HOME", word)))
+
+
+def git_alias(name: str, cwd: str, global_args: list):
+    """cwd で、コマンドの git の global option (-C・-c・--git-dir・--work-tree) を付けて読んだ alias.<name> を返す
+    (無ければ None)。コマンドの中の `-c alias.x=commit` や `-C <dir>` の先の設定も実行時と同じに解決するため。"""
+    try:
+        result = subprocess.run(["git", *global_args, "config", "--get", f"alias.{name}"], cwd=cwd or None,
+                                capture_output=True, text=True, timeout=GIT_CONFIG_TIMEOUT_SEC)
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return result.stdout.strip() if result.returncode == 0 and result.stdout.strip() else None
+
+
+def subcommand_bypass_reason(subcommand: str, args: list):
+    """commit・merge・push の引数に hook を飛ばすオプションがあれば理由を返す。"""
+    long_with_value = LONG_OPTIONS_WITH_VALUE.get(subcommand, ())
+    short_with_value = COMMIT_SHORT_WITH_VALUE if subcommand == "commit" else SHORT_OPTIONS_WITH_VALUE.get(subcommand, "")
+    index = 0
+    while index < len(args):
+        word = args[index]
+        index += 1
+        if word == "--":
+            break
+        if word.startswith("--"):
+            if is_no_verify(word):
+                return f"git {subcommand} {word}"
+            if word in long_with_value:
+                index += 1
+            continue
+        if not word.startswith("-") or word == "-":
+            continue
+        for position, char in enumerate(word[1:], start=1):
+            if subcommand == "commit" and char == "n":
+                return f"git commit {word} (-n は --no-verify)"
+            if char in short_with_value:
+                if position == len(word) - 1:
+                    index += 1
+                break
+            if subcommand == "commit" and char in COMMIT_SHORT_OPTIONAL_VALUE:
+                break
+    return None
+
+
+def git_bypass_reason(args: list, cwd: str, hookspath_overridden: bool, depth: int = 0, global_args: tuple = ()):
+    """`git` の後ろの語 args が hook を飛ばすコミット・push なら理由を返す。global_args は alias の展開元までに
+    付いていた global option (alias の解決に渡す)。"""
+    global_args = list(global_args)
+    index = 0
+    while index < len(args) and args[index].startswith("-"):
+        word = args[index]
+        index += 1
+        name, has_value, value = word.partition("=")
+        if name in GIT_OPTIONS_WITH_VALUE and not has_value:
+            value = args[index] if index < len(args) else ""
+            index += 1
+        if name in ("-C", "-c"):
+            global_args += [name, value]
+        elif name in ("--git-dir", "--work-tree"):
+            global_args.append(f"{name}={value}")
+        if name == "-c" and is_hookspath_key(value.partition("=")[0]):
+            hookspath_overridden = True
+        if name == "--config-env" and is_hookspath_key(value.partition("=")[0]):
+            hookspath_overridden = True
+    if index >= len(args):
+        return None
+    subcommand, rest = args[index], args[index + 1:]
+    if subcommand in HOOKED_SUBCOMMANDS:
+        if hookspath_overridden:
+            return f"core.hooksPath を差し替えた git {subcommand}"
+        return subcommand_bypass_reason(subcommand, rest)
+    if depth >= MAX_ALIAS_DEPTH:
+        return None
+    alias = git_alias(subcommand, cwd, global_args)
+    if alias is None:
+        return None
+    if alias.startswith("!"):
+        return shell_bypass_reason(" ".join([alias[1:]] + [shlex.quote(word) for word in rest]), cwd, depth + 1,
+                                   hookspath_overridden)
+    return git_bypass_reason(split_words(alias) + rest, cwd, hookspath_overridden, depth + 1, tuple(global_args))
+
+
+def command_bypass_reason(words: list, cwd: str, depth: int, hookspath_overridden: bool = False):
+    """単純コマンド 1 つの語の列が hook を飛ばすコミット・push なら理由を返す。hookspath_overridden は、親のシェルや
+    alias の展開元で core.hooksPath を差し替えた環境 (子のプロセスに引き継がれる) で実行されるか。"""
+    index = 0
+    while index < len(words):
+        word = words[index]
+        if word in SHELL_KEYWORDS:
+            index += 1
+        elif re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]*=.*", word, re.DOTALL):
+            hookspath_overridden = hookspath_overridden or env_assignment_overrides_hookspath(word)
+            index += 1
+        elif os.path.basename(word) in WRAPPERS:
+            # wrapper のオプション・値 (env -u VAR、timeout 10、xargs -I{} 等) の形は wrapper ごとに違うため、
+            # 後ろの語から実行されるコマンド (git・シェル・eval) を探す
+            wrapper = os.path.basename(word)
+            index += 1
+            while index < len(words) and os.path.basename(words[index]) not in ("git", "eval") + SHELLS:
+                hookspath_overridden = (hookspath_overridden or env_assignment_overrides_hookspath(words[index])
+                                        or (wrapper == "env" and env_option_clears_environment(words[index])))
+                index += 1
+        else:
+            break
+    if index >= len(words):
+        return None
+    program, rest = os.path.basename(words[index]), words[index + 1:]
+    if program == "git":
+        return git_bypass_reason(rest, cwd, hookspath_overridden, depth)
+    if program in SHELLS or program == "eval":
+        if program == "eval":
+            return shell_bypass_reason(" ".join(rest), cwd, depth + 1, hookspath_overridden)
+        for position, word in enumerate(rest):
+            if re.fullmatch(r"-[A-Za-z]*c[A-Za-z]*", word) and position + 1 < len(rest):
+                return shell_bypass_reason(rest[position + 1], cwd, depth + 1, hookspath_overridden)
+    return None
+
+
+def shell_bypass_reason(command: str, cwd: str, depth: int = 0, hookspath_overridden: bool = False):
+    """シェルのコマンド文字列が hook を飛ばすコミット・push を含めば理由を返す。hookspath_overridden は
+    command_bypass_reason と同じ。"""
+    if depth > MAX_ALIAS_DEPTH:
+        return None
+    for words in split_simple_commands(command):
+        reason = command_bypass_reason(words, cwd, depth, hookspath_overridden)
+        if reason:
+            return reason
+    return None
+
+
+def main() -> int:
+    """標準入力の PreToolUse の JSON を読み、止める時は理由と代わりの手順を出して 2 を返す。"""
+    try:
+        payload = json.load(sys.stdin)
+    except (json.JSONDecodeError, ValueError):
+        return 0
+    if payload.get("tool_name") != "Bash":
+        return 0
+    command = (payload.get("tool_input") or {}).get("command") or ""
+    if "git" not in command:
+        return 0
+    reason = shell_bypass_reason(command, payload.get("cwd") or os.getcwd())
+    if reason is None:
+        return 0
+    message = GUIDE.format(reason=reason)
+    print(message, file=sys.stderr)
+    print(message)
+    return 2
+
+
+if __name__ == "__main__":
+    sys.exit(main())

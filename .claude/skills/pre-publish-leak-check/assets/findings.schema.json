@@ -1,0 +1,25 @@
+{
+  "description": "review-leaks.sh が claude -p の --json-schema に渡す、漏れの候補の一覧の形。各項目の書き方は system prompt (assets/review-prompt.md) の「出力」",
+  "type": "object",
+  "properties": {
+    "verdict": {"description": "「出力」の verdict", "type": "string", "enum": ["clean", "suspect"]},
+    "findings": {
+      "description": "「出力」の findings",
+      "type": "array",
+      "items": {
+        "type": "object",
+        "properties": {
+          "kind": {"description": "「漏らしてはいけない情報」の分類", "type": "string", "enum": ["api_key", "token", "password", "private_key", "env_value", "personal_info", "internal_endpoint", "other"]},
+          "location": {"description": "「出力」の location", "type": "string"},
+          "excerpt": {"description": "「出力」の excerpt", "type": "string"},
+          "confidence": {"description": "「出力」の confidence", "type": "number", "minimum": 0, "maximum": 1},
+          "verdict": {"description": "「出力」の findings の verdict", "type": "string", "enum": ["leak", "placeholder"]}
+        },
+        "required": ["kind", "location", "excerpt", "confidence", "verdict"],
+        "additionalProperties": false
+      }
+    }
+  },
+  "required": ["verdict", "findings"],
+  "additionalProperties": false
+}

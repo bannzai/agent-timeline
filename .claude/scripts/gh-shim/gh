@@ -1,0 +1,642 @@
+#!/usr/bin/env bash
+# gh - Claude Code のクラウドセッション向けの gh シム。GitHub proxy が 403 にする GraphQL 経由のサブコマンドを REST に翻訳する
+#
+# 配布先: <リポジトリ>/.claude/scripts/gh-shim/gh。同じく配布する .claude/settings.json の SessionStart hook
+# (enable-gh-shim.sh) が CLAUDE_CODE_REMOTE=true の時だけ、このディレクトリを PATH の先頭に足す
+# (castle 側の実体は distribution/claude/scripts/gh-shim/。起票元: https://github.com/bannzai/castle/issues/1544 、
+# 実測: spikes/cloud-session-1544/RESULT.md)。
+#
+# 方針:
+#   - CLAUDE_CODE_REMOTE が "true" でなければ、引数をそのまま本物の gh に渡す (ローカルでは挙動を変えない)
+#   - "true" の時、下の「翻訳する呼び出し」に当たるものだけ REST (gh api repos/... と ccr/*) で組み立てて gh と同じ形で出す。
+#     それ以外 (REST で動く gh api・gh pr create / comment / edit・gh issue create / comment・gh run 等) はそのまま本物の gh に渡す
+#   - 翻訳できない呼び出し (対応していないサブコマンド・--json のフィールド・GraphQL の query) もそのまま本物の gh に渡す。
+#     proxy の 403 がそのまま返り、黙って別の結果を返さない
+#
+# 翻訳する呼び出し (castle の skill が使う形。--jq / -q は翻訳した JSON に jq -r で適用する):
+#   gh repo view [<owner/repo>] --json <fields>           fields: nameWithOwner name owner visibility defaultBranchRef url isPrivate id description
+#   gh pr view [<number>|<url>] [-R <owner/repo>] [--json <fields>]
+#       fields: number state title body headRefOid headRefName baseRefName url author mergeable isDraft mergedAt labels
+#               isCrossRepository additions deletions createdAt updatedAt closedAt files commits comments reviews statusCheckRollup
+#       --json 無し: title / state / author / labels / number / url / additions / deletions と本文を gh の非 TTY の形で出す
+#   gh pr list [-R <owner/repo>] [--state open|closed|merged|all] [--limit <n>] [--head <branch>] [--base <branch>] [--author <login>|@me] [--label <name>] [--json <fields>]
+#       fields: pr view のうち files commits comments reviews statusCheckRollup additions deletions mergeable を除くもの
+#   gh pr checks [<number>] [-R <owner/repo>] --json <fields>   fields: name bucket state link workflow event startedAt completedAt description
+#   gh issue view <number>|<url> [-R <owner/repo>] [--json <fields>] [--comments]
+#       fields: number state title body url author labels comments createdAt updatedAt closedAt stateReason
+#       --json 無し: gh の非 TTY の形 (--comments はコメントだけ)
+#   gh issue list [-R <owner/repo>] [--state open|closed|all] [--limit <n>] [--label <name>] [--author <login>] [--json <fields>]
+#       fields: issue view のうち comments を除くもの
+#   gh pr diff [<number>] [-R <owner/repo>]
+#   gh pr create --title <t> (--body <b> | --body-file <f>) [-R] [--base <b>] [--head <h>] [--draft] [--label <l>]...   (head は現在のブランチ)
+#   gh pr comment <number> (--body | --body-file) [-R]       gh issue comment <number> (--body | --body-file) [-R]
+#   gh pr edit [<number>] [--title] [--body | --body-file] [--base] [--add-label]... [-R]
+#   gh pr close [<number>] [--comment <b>] [-R]              gh issue close <number> [--comment <b>] [--reason completed|"not planned"] [-R]
+#   gh issue create --title <t> (--body | --body-file) [--label <l>]... [-R]   (--attach は翻訳しない。添付の upload は GraphQL を使う)
+#       (gh の create / comment / edit / close はリポジトリの解決に GraphQL を使うため、REST の endpoint 自体は通っても 403 になる。
+#        実測: spikes/cloud-session-1544/RESULT.md の手順 5・6)
+#   gh api graphql -f query=... (castle の 3 系統が投げる pullRequest の query と、reviewThreads の返信・解決の mutation。
+#       対応は同じディレクトリの graphql.sh を SSOT とし、query の識別子が対応の集合に収まる時だけ翻訳する)
+#
+# リポジトリの解決は gh と同じ: -R / --repo、無ければ GH_REPO、無ければ origin の URL。番号を省いた pr view / pr checks は
+# 現在のブランチの PR (open を優先、同じ状態なら新しい順) を使う。
+#
+# 環境変数:
+#   CLAUDE_CODE_REMOTE   "true" の時だけ翻訳する
+#   GH_SHIM_REAL_GH      本物の gh のパス (未指定なら PATH から、自分自身を除いた最初の gh)
+#   GH_REPO              gh と同じ (対象リポジトリ)
+# 前提: jq と git が PATH にある
+# exit code: 翻訳した呼び出しは REST の失敗で 1。本物の gh に渡した時はその exit code
+set -uo pipefail
+
+self="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/$(basename "${BASH_SOURCE[0]}")"
+
+# PATH から自分自身を除いた最初の gh を本物として使う
+resolve_real_gh() {
+  if [ -n "${GH_SHIM_REAL_GH:-}" ]; then
+    printf '%s\n' "$GH_SHIM_REAL_GH"
+    return 0
+  fi
+  local dir candidate
+  local IFS=:
+  for dir in $PATH; do
+    [ -n "$dir" ] || continue
+    candidate="$dir/gh"
+    [ -x "$candidate" ] || continue
+    if [ "$(cd "$(dirname "$candidate")" 2>/dev/null && pwd)/gh" != "$self" ]; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+real_gh="$(resolve_real_gh)" || { echo "gh-shim: 本物の gh が PATH にありません" >&2; exit 1; }
+
+passthrough() {
+  exec "$real_gh" "$@"
+}
+
+if [ "${CLAUDE_CODE_REMOTE:-}" != "true" ] || [ $# -lt 2 ]; then
+  passthrough "$@"
+fi
+
+# 翻訳の途中で REST が失敗した時は理由を出して exit 1 (本物の gh と同じく stderr)
+die() {
+  echo "gh-shim: $*" >&2
+  exit 1
+}
+
+# REST を本物の gh で呼ぶ (GH_TOKEN・proxy の設定はそのまま効く)
+rest() {
+  "$real_gh" api "$@"
+}
+
+work_dir="$(mktemp -d)"
+trap 'rm -rf "$work_dir"' EXIT
+
+# stdin の JSON を一時ファイルに書き、そのパスを出す。大きい応答 (check run・files・comments) は jq に --slurpfile で渡す
+# (--argjson の引数は Linux の 1 引数の上限 128 KiB を超えると "Argument list too long" になる)
+to_file() {
+  local f
+  f="$(mktemp "$work_dir/json.XXXXXX")" || return 1
+  cat > "$f"
+  printf '%s' "$f"
+}
+
+# 一覧の REST をページごとに取り、各ページに jq のフィルタ (配列 → 配列) を当て、limit 件揃うか最後のページまでで止める。
+# 結果の配列を stdout に出す。引数: クエリ (per_page と page を除く)、フィルタ、limit、以降は jq に渡す追加の引数 (--arg 等)
+rest_list_until() {
+  local query="$1" filter="$2" limit="$3"
+  shift 3
+  local page=1 acc_f page_f got count
+  acc_f="$(mktemp "$work_dir/list.XXXXXX")" || return 1
+  while :; do
+    page_f="$(rest "$query&per_page=100&page=$page" | to_file)" || return 1
+    jq -c -n "$@" --slurpfile page "$page_f" "\$page[0] | $filter | .[]" >> "$acc_f" || return 1
+    got="$(jq 'length' "$page_f")"
+    count="$(wc -l < "$acc_f" | tr -d ' ')"
+    if [ "$count" -ge "$limit" ] || [ "$got" -lt 100 ]; then break; fi
+    page=$((page + 1))
+  done
+  jq -s --argjson limit "$limit" '.[:$limit]' "$acc_f"
+}
+
+# ページ送りの REST を 1 つの配列にする。応答がオブジェクト (check-runs 等) の時は $1 のキーの配列を繋ぐ
+rest_all() {
+  local key="${2:-}"
+  if [ -n "$key" ]; then
+    "$real_gh" api --paginate --slurp "$1" | jq --arg key "$key" 'map(.[$key]) | add // []'
+  else
+    "$real_gh" api --paginate --slurp "$1" | jq 'add // []'
+  fi
+}
+
+viewer_login=""
+# 認証ユーザーの login (viewerDidAuthor の判定に使う)。1 回だけ取る
+viewer() {
+  if [ -z "$viewer_login" ]; then
+    viewer_login="$(rest user --jq .login)" || die "認証ユーザーを取得できません"
+  fi
+  printf '%s\n' "$viewer_login"
+}
+
+# 対象リポジトリ (owner/name) を gh と同じ順で決める: 引数 → GH_REPO → origin の URL
+resolve_repo() {
+  local given="${1:-${GH_REPO:-}}"
+  if [ -n "$given" ]; then
+    # gh と同じく "https://github.com/owner/repo"・"github.com/owner/repo"・"owner/repo" を受け、owner/repo に揃える
+    given="${given#https://}"
+    given="${given#http://}"
+    given="${given#github.com/}"
+    given="${given%.git}"
+    given="${given%/}"
+    [[ "$given" == */* ]] || die "リポジトリの指定を解釈できません: ${1:-${GH_REPO:-}}"
+    printf '%s\n' "$given"
+    return 0
+  fi
+  local url
+  url="$(git config --get remote.origin.url 2>/dev/null)" || die "リポジトリを解決できません (-R か GH_REPO を指定する)"
+  case "$url" in
+    https://github.com/*) url="${url#https://github.com/}" ;;
+    git@github.com:*) url="${url#git@github.com:}" ;;
+    ssh://git@github.com/*) url="${url#ssh://git@github.com/}" ;;
+    *) die "origin の URL を解釈できません: $url" ;;
+  esac
+  url="${url%.git}"
+  printf '%s\n' "${url%/}"
+}
+
+# 現在のブランチの PR 番号 (open を優先、同じ状態なら新しい順)。無ければ exit 1
+resolve_current_pr() {
+  local repo="$1" branch
+  branch="$(git rev-parse --abbrev-ref HEAD 2>/dev/null)" || die "現在のブランチを解決できません"
+  [ "$branch" != "HEAD" ] || die "detached HEAD では PR を解決できません"
+  local number
+  number="$(rest "repos/$repo/pulls?head=$(uri "${repo%%/*}:$branch")&state=all&sort=created&direction=desc&per_page=30" \
+    --jq '(map(select(.state == "open")) + map(select(.state != "open"))) | .[0].number // empty')" || die "PR の一覧を取得できません"
+  [ -n "$number" ] || die "no pull requests found for branch \"$branch\""
+  printf '%s\n' "$number"
+}
+
+# 対象のリポジトリと番号を決めて変数 repo / number に入れる。引数: -R の値、PR / issue の指定 (空・番号・URL・ブランチ名)。
+# URL は gh と同じくその URL の owner/repo を対象にする (-R や origin とは別のリポジトリでも、URL の方を使う)
+resolve_target() {
+  local repo_opt="$1" spec="$2"
+  if [[ "$spec" =~ ^https://github\.com/([^/]+/[^/]+)/(pull|issues)/([0-9]+) ]]; then
+    repo="${BASH_REMATCH[1]}"
+    number="${BASH_REMATCH[3]}"
+    return 0
+  fi
+  repo="$(resolve_repo "$repo_opt")" || exit 1
+  number="$(resolve_number "$repo" "$spec")" || exit 1
+}
+
+# 引数の PR / issue の指定 (番号・ブランチ名) を番号にする。ブランチ名は PR だけ対応
+resolve_number() {
+  local repo="$1" spec="$2"
+  case "$spec" in
+    "") resolve_current_pr "$repo" ;;
+    *[!0-9]*)
+      if [[ "$spec" =~ /(pull|issues)/([0-9]+) ]]; then
+        die "URL の形を解釈できません: $spec"
+      else
+        local number
+        number="$(rest "repos/$repo/pulls?head=$(uri "${repo%%/*}:$spec")&state=all&sort=created&direction=desc&per_page=30" \
+          --jq '(map(select(.state == "open")) + map(select(.state != "open"))) | .[0].number // empty')" || die "PR の一覧を取得できません"
+        [ -n "$number" ] || die "no pull requests found for branch \"$spec\""
+        printf '%s\n' "$number"
+      fi
+      ;;
+    *) printf '%s\n' "$spec" ;;
+  esac
+}
+
+# --json のフィールド列 (カンマ区切り) が対応の集合に収まるか。収まらなければ 1 (呼び出し側は本物の gh に渡す)
+fields_supported() {
+  local fields="$1" supported="$2" f
+  local IFS=,
+  for f in $fields; do
+    case " $supported " in
+      *" $f "*) ;;
+      *) return 1 ;;
+    esac
+  done
+  return 0
+}
+
+# 翻訳した JSON を gh と同じ形で出す: --json のフィールドだけに絞り、キーを並べ替え、--jq があれば jq -r で適用する
+emit_json() {
+  local json="$1" fields="$2" jq_expr="$3"
+  local picked
+  picked="$(printf '%s' "$json" | jq -S --arg fields "$fields" '
+    ($fields | split(",")) as $keys
+    | if type == "array" then map(with_entries(select(.key as $k | $keys | index($k)))) else with_entries(select(.key as $k | $keys | index($k))) end')"
+  if [ -n "$jq_expr" ]; then
+    printf '%s\n' "$picked" | jq -r "$jq_expr"
+  else
+    printf '%s\n' "$picked"
+  fi
+}
+
+# jq: REST の user を gh の author の形にする (bot の login は GraphQL と同じく [bot] 無し)
+# jq: REST の user を gh の author ({id, is_bot, login, name}) にする。user が null (削除済みのアカウント) の時は
+# GraphQL の author と同じく null。jq_login は login だけを取る版
+jq_author='def author: if . == null then null else {id: .node_id, is_bot: (.type == "Bot"), login: (.login | sub("\\[bot\\]$"; "")), name: (.name // .login)} end;'
+jq_login='def login: if . == null then null else (.login | sub("\\[bot\\]$"; "")) end;'
+
+# jq: REST の pull を gh pr view の基本フィールドにする
+jq_pr_base="$jq_author"'
+  def pr_state: if .merged_at != null then "MERGED" elif .state == "open" then "OPEN" else "CLOSED" end;
+  def pr_base: {
+    number, title, body: (.body // ""),
+    state: pr_state,
+    headRefOid: .head.sha, headRefName: .head.ref, baseRefName: .base.ref, url: .html_url,
+    author: (.user | author),
+    mergeable: (if .mergeable == null then "UNKNOWN" elif .mergeable then "MERGEABLE" else "CONFLICTING" end),
+    isDraft: .draft, mergedAt: .merged_at,
+    labels: [.labels[] | {id: .node_id, name, description: (.description // ""), color}],
+    isCrossRepository: ((.head.repo.full_name // "") != (.base.repo.full_name // "")),
+    additions, deletions, createdAt: .created_at, updatedAt: .updated_at, closedAt: .closed_at
+  };'
+
+# jq: REST の issue を gh issue view の基本フィールドにする
+jq_issue_base="$jq_author"'
+  def issue_base: {
+    number, title, body: (.body // ""),
+    state: (if (.pull_request.merged_at // null) != null then "MERGED" else (.state | ascii_upcase) end),
+    stateReason: (.state_reason | if . == null then null else ascii_upcase end), url: .html_url,
+    author: (.user | author),
+    labels: [.labels[] | {id: .node_id, name, description: (.description // ""), color}],
+    createdAt: .created_at, updatedAt: .updated_at, closedAt: .closed_at
+  };'
+
+# jq: REST の issue comment を gh の comments の要素にする ($viewer は認証ユーザー)
+jq_issue_comment="$jq_login"'
+  def issue_comment($viewer): {
+    id: .node_id, author: (.user | if . == null then null else {login: login} end), authorAssociation: .author_association, body: (.body // ""),
+    createdAt: .created_at, includesCreatedEdit: (.created_at != .updated_at), isMinimized: false, minimizedReason: "",
+    reactionGroups: [], url: .html_url, viewerDidAuthor: (.user.login == $viewer)
+  };'
+
+# check-runs と combined status を gh の statusCheckRollup の要素にする。workflowName は head の workflow run から引く
+status_check_rollup() {
+  local repo="$1" sha="$2"
+  local runs_f checks_f statuses_f
+  runs_f="$(rest "repos/$repo/actions/runs?head_sha=$sha&per_page=100" | to_file)" || die "workflow run を取得できません"
+  checks_f="$(rest_all "repos/$repo/commits/$sha/check-runs?per_page=100" check_runs | to_file)" || die "check run を取得できません"
+  # combined status の statuses は 1 ページ 30 件のためページ送りで全件を繋ぐ
+  statuses_f="$(rest_all "repos/$repo/commits/$sha/status?per_page=100" statuses | to_file)" || die "commit status を取得できません"
+  jq -n --slurpfile runs "$runs_f" --slurpfile checks "$checks_f" --slurpfile statuses "$statuses_f" '
+    ($runs[0].workflow_runs // [] | map({key: (.check_suite_id | tostring), value: {name, event}}) | from_entries) as $suites
+    | ($checks[0] | map({
+        __typename: "CheckRun",
+        completedAt: .completed_at, conclusion: (.conclusion | if . == null then null else ascii_upcase end),
+        detailsUrl: (.html_url // ""), name, startedAt: .started_at, status: (.status | ascii_upcase),
+        workflowName: ($suites[(.check_suite.id | tostring)].name // ""),
+        event: ($suites[(.check_suite.id | tostring)].event // "")
+      }))
+      + ($statuses[0] | map({
+        __typename: "StatusContext", context, startedAt: .created_at, state: (.state | ascii_upcase),
+        targetUrl: (.target_url // ""), description: (.description // "")
+      }))'
+}
+
+# gh pr checks の要素 (bucket の対応は cli/cli pkg/cmd/pr/checks/aggregate.go v2.102.0 と同じ。重複は context 名、
+# または name/workflow/event の組で新しいものだけ残す)
+pr_checks_json() {
+  status_check_rollup "$1" "$2" | jq '
+    map(if .__typename == "StatusContext" then {name: .context, state, link: .targetUrl, workflow: "", event: "", startedAt, completedAt: null, description, _key: ("ctx:" + .context)}
+        else {name, state: (if .status == "COMPLETED" then (.conclusion // "") else .status end), link: .detailsUrl, workflow: .workflowName, event, startedAt, completedAt, description: "", _key: ("run:" + .name + "/" + .workflowName + "/" + .event)} end)
+    | sort_by(.startedAt // "") | reverse
+    | reduce .[] as $c ({seen: {}, out: []}; if .seen[$c._key] then . else {seen: (.seen + {($c._key): true}), out: (.out + [$c])} end)
+    | .out
+    | map(. + {bucket: (
+        if .state == "SUCCESS" then "pass"
+        elif (.state == "SKIPPED" or .state == "NEUTRAL") then "skipping"
+        elif (.state == "ERROR" or .state == "FAILURE" or .state == "TIMED_OUT" or .state == "ACTION_REQUIRED") then "fail"
+        elif .state == "CANCELLED" then "cancel"
+        else "pending" end)} | del(._key))'
+}
+
+# pr view の JSON (fields に応じて必要な REST だけ呼ぶ)
+pr_view_json() {
+  local repo="$1" number="$2" fields="$3"
+  # 各 REST は一時ファイルに受けて失敗を die にする ($( ) を jq の引数に直接書くと失敗が jq に伝わらず空の一覧になる。
+  # 大きい応答は --argjson の引数長の上限に当たるため --slurpfile で渡す)
+  local pr_f acc_f part_f login
+  pr_f="$(rest "repos/$repo/pulls/$number" | to_file)" || die "PR #$number を取得できません"
+  acc_f="$(jq --slurpfile pr "$pr_f" -n "$jq_pr_base"' $pr[0] | pr_base' | to_file)"
+  case ",$fields," in *,files,*)
+    part_f="$(rest_all "repos/$repo/pulls/$number/files?per_page=100" | to_file)" || die "PR #$number の files を取得できません"
+    acc_f="$(jq -n --slurpfile acc "$acc_f" --slurpfile files "$part_f" '$acc[0] + {files: ($files[0] | map({path: .filename, additions, deletions, changeType: (.status | ascii_upcase | if . == "REMOVED" then "DELETED" else . end)}))}' | to_file)" ;; esac
+  case ",$fields," in *,commits,*)
+    part_f="$(rest_all "repos/$repo/pulls/$number/commits?per_page=100" | to_file)" || die "PR #$number の commits を取得できません"
+    acc_f="$(jq -n --slurpfile acc "$acc_f" --slurpfile commits "$part_f" '$acc[0] + {commits: ($commits[0] | map({
+      authoredDate: .commit.author.date, committedDate: .commit.committer.date, oid: .sha,
+      messageHeadline: (.commit.message | split("\n")[0]), messageBody: (.commit.message | split("\n")[1:] | join("\n") | ltrimstr("\n")),
+      authors: [{email: .commit.author.email, id: (.author.node_id // ""), login: (.author.login // ""), name: .commit.author.name}]}))}' | to_file)" ;; esac
+  case ",$fields," in *,comments,*)
+    part_f="$(rest_all "repos/$repo/issues/$number/comments?per_page=100" | to_file)" || die "PR #$number の comments を取得できません"
+    login="$(viewer)" || exit 1
+    acc_f="$(jq -n --slurpfile acc "$acc_f" --arg viewer "$login" --slurpfile comments "$part_f" "$jq_issue_comment"' $acc[0] + {comments: ($comments[0] | map(issue_comment($viewer)))}' | to_file)" ;; esac
+  case ",$fields," in *,reviews,*)
+    part_f="$(rest_all "repos/$repo/pulls/$number/reviews?per_page=100" | to_file)" || die "PR #$number の reviews を取得できません"
+    acc_f="$(jq -n --slurpfile acc "$acc_f" --slurpfile reviews "$part_f" "$jq_login"' $acc[0] + {reviews: ($reviews[0] | map({
+      id: .node_id, author: (.user | if . == null then null else {login: login} end), authorAssociation: .author_association, body: (.body // ""), submittedAt: .submitted_at,
+      includesCreatedEdit: false, reactionGroups: [], state, commit: {oid: .commit_id}}))}' | to_file)" ;; esac
+  case ",$fields," in *,statusCheckRollup,*)
+    part_f="$(status_check_rollup "$repo" "$(jq -r '.head.sha' "$pr_f")" | to_file)" || exit 1
+    acc_f="$(jq -n --slurpfile acc "$acc_f" --slurpfile rollup "$part_f" '$acc[0] + {statusCheckRollup: ($rollup[0] | map(del(.event, .description)))}' | to_file)" ;; esac
+  cat "$acc_f"
+}
+
+# issue view の JSON
+issue_view_json() {
+  local repo="$1" number="$2" fields="$3"
+  local issue_f comments_f login
+  issue_f="$(rest "repos/$repo/issues/$number" | to_file)" || die "issue #$number を取得できません"
+  case ",$fields," in *,comments,*)
+    comments_f="$(rest_all "repos/$repo/issues/$number/comments?per_page=100" | to_file)" || die "issue #$number の comments を取得できません"
+    login="$(viewer)" || exit 1
+    jq -n --slurpfile issue "$issue_f" --arg viewer "$login" --slurpfile comments "$comments_f" "$jq_issue_base $jq_issue_comment"' ($issue[0] | issue_base) + {comments: ($comments[0] | map(issue_comment($viewer)))}' ;;
+  *) jq --slurpfile issue "$issue_f" -n "$jq_issue_base"' $issue[0] | issue_base' ;;
+  esac
+}
+
+# gh の非 TTY の pr view / issue view の本文表示
+render_plain() {
+  local kind="$1" json="$2"
+  if [ "$kind" = pr ]; then
+    printf '%s' "$json" | jq -r '
+      "title:\t\(.title)", "state:\t\(.state)", "author:\t\(.author.login) (\(.author.name))",
+      "labels:\t\([.labels[].name] | join(", "))", "assignees:\t", "reviewers:\t", "projects:\t", "milestone:\t",
+      "number:\t\(.number)", "url:\t\(.url)", "additions:\t\(.additions)", "deletions:\t\(.deletions)", "--", .body'
+  else
+    printf '%s' "$json" | jq -r '
+      "title:\t\(.title)", "state:\t\(.state)", "author:\t\(.author.login) (\(.author.name))",
+      "labels:\t\([.labels[].name] | join(", "))", "comments:\t\(.comments | length)", "assignees:\t", "projects:\t", "milestone:\t",
+      "number:\t\(.number)", "url:\t\(.url)", "--", .body'
+  fi
+}
+
+# gh の非 TTY の --comments の表示 (コメントだけ)
+render_comments() {
+  printf '%s' "$1" | jq -r '.comments[] | "author:\t\(.author.login)", "association:\t\(.authorAssociation | ascii_downcase)", "edited:\t\(.includesCreatedEdit)", "status:\tnone", "--", .body, "--"'
+}
+
+# 共通のオプション解析 (翻訳するサブコマンドの範囲だけ)。未知のオプションは翻訳せず本物の gh に渡す
+opt_repo="" opt_json="" opt_jq="" opt_comments=false opt_state="" opt_limit="" opt_head="" opt_base="" opt_author="" opt_labels=() positional=()
+
+# URL のクエリの値にする (& や # を含む label 名・ブランチ名をそのまま繋がない)
+uri() { jq -rn --arg v "$1" '$v | @uri'; }
+parse_opts() {
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -R|--repo) opt_repo="$2"; shift 2 ;;
+      --repo=*) opt_repo="${1#--repo=}"; shift ;;
+      --json) opt_json="$2"; shift 2 ;;
+      --json=*) opt_json="${1#--json=}"; shift ;;
+      -q|--jq) opt_jq="$2"; shift 2 ;;
+      --jq=*) opt_jq="${1#--jq=}"; shift ;;
+      -c|--comments) opt_comments=true; shift ;;
+      -s|--state) opt_state="$2"; shift 2 ;;
+      --state=*) opt_state="${1#--state=}"; shift ;;
+      -L|--limit) opt_limit="$2"; shift 2 ;;
+      --limit=*) opt_limit="${1#--limit=}"; shift ;;
+      -H|--head) opt_head="$2"; shift 2 ;;
+      -B|--base) opt_base="$2"; shift 2 ;;
+      -A|--author) opt_author="$2"; shift 2 ;;
+      -l|--label)
+        # gh と同じく、繰り返しとカンマ区切りの両方を受け、全部の label を持つものに絞る
+        local IFS=, part
+        for part in $2; do [ -n "$part" ] && opt_labels+=("$part"); done
+        unset IFS
+        shift 2 ;;
+      --) shift; positional+=("$@"); break ;;
+      -*) return 1 ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  return 0
+}
+
+# 書き込み系 (create / comment / edit / close) のオプション解析。--body と --body-file は片方だけ。未知のオプションは翻訳しない
+w_title="" w_body="" w_body_given=false w_base="" w_head="" w_draft=false w_reason="" w_labels=()
+parse_write_opts() {
+  positional=()
+  while [ $# -gt 0 ]; do
+    case "$1" in
+      -R|--repo) opt_repo="$2"; shift 2 ;;
+      --repo=*) opt_repo="${1#--repo=}"; shift ;;
+      -t|--title) w_title="$2"; shift 2 ;;
+      -b|--body) w_body="$2"; w_body_given=true; shift 2 ;;
+      -F|--body-file)
+        # $( ) は末尾の改行を落とすため、番兵を付けて読んでから外す (gh はファイルの内容をそのまま本文にする)
+        if [ "$2" = "-" ]; then w_body="$(cat; printf x)"; else w_body="$(cat "$2" && printf x)" || return 1; fi
+        w_body="${w_body%x}"
+        w_body_given=true; shift 2 ;;
+      -B|--base) w_base="$2"; shift 2 ;;
+      -H|--head) w_head="$2"; shift 2 ;;
+      -d|--draft) w_draft=true; shift ;;
+      -l|--label|--add-label)
+        # gh と同じく "a,b" のカンマ区切りも 1 つずつの label にする
+        local IFS=, part
+        for part in $2; do [ -n "$part" ] && w_labels+=("$part"); done
+        unset IFS
+        shift 2 ;;
+      # -r / -c は close 系では理由・コメントだが、pr create では reviewer (未対応) のため close 系だけ受け付ける
+      -r|--reason) case "$sub" in "issue close") w_reason="$2"; shift 2 ;; *) return 1 ;; esac ;;
+      -c|--comment) case "$sub" in "issue close"|"pr close") w_body="$2"; w_body_given=true; shift 2 ;; *) return 1 ;; esac ;;
+      --) shift; positional+=("$@"); break ;;
+      -*) return 1 ;;
+      *) positional+=("$1"); shift ;;
+    esac
+  done
+  return 0
+}
+
+# --limit の既定は gh と同じ 30
+limit_or_default() { printf '%s\n' "${opt_limit:-30}"; }
+
+pr_fields_base="number state title body headRefOid headRefName baseRefName url author mergeable isDraft mergedAt labels isCrossRepository additions deletions createdAt updatedAt closedAt"
+pr_fields_view="$pr_fields_base files commits comments reviews statusCheckRollup"
+# REST の pulls の一覧には additions / deletions / mergeable が無い (詳細の pulls/{n} だけにある) ため、一覧では受け付けない
+pr_fields_list="number state title body headRefOid headRefName baseRefName url author isDraft mergedAt labels isCrossRepository createdAt updatedAt closedAt"
+issue_fields_base="number state title body url author labels createdAt updatedAt closedAt stateReason"
+issue_fields_view="$issue_fields_base comments"
+repo_fields="nameWithOwner name owner visibility defaultBranchRef url isPrivate id description"
+checks_fields="name bucket state link workflow event startedAt completedAt description"
+
+sub1="$1"
+sub2="$2"
+sub="$1 $2"
+shift 2
+case "$sub" in
+  "repo view")
+    parse_opts "$@" || passthrough repo view "$@"
+    [ -n "$opt_json" ] && [ "$opt_comments" = false ] || passthrough repo view "$@"
+    fields_supported "$opt_json" "$repo_fields" || passthrough repo view "$@"
+    repo="$(resolve_repo "${positional[0]:-}")" || exit 1
+    json="$(rest "repos/$repo")" || die "リポジトリ $repo を取得できません"
+    emit_json "$(printf '%s' "$json" | jq '{nameWithOwner: .full_name, name, owner: {id: .owner.node_id, login: .owner.login}, visibility: (.visibility | ascii_upcase), defaultBranchRef: {name: .default_branch}, url: .html_url, isPrivate: .private, id: .node_id, description: (.description // "")}')" "$opt_json" "$opt_jq"
+    ;;
+  "pr view")
+    parse_opts "$@" || passthrough pr view "$@"
+    [ "$opt_comments" = false ] || passthrough pr view "$@"
+    resolve_target "$opt_repo" "${positional[0]:-}"
+    # 取得の失敗 (die は $( ) の中では子シェルしか終えない) を exit 1 に伝える
+    if [ -n "$opt_json" ]; then
+      fields_supported "$opt_json" "$pr_fields_view" || passthrough pr view "$@"
+      json="$(pr_view_json "$repo" "$number" "$opt_json")" || exit 1
+      emit_json "$json" "$opt_json" "$opt_jq"
+    else
+      json="$(pr_view_json "$repo" "$number" "$pr_fields_base")" || exit 1
+      render_plain pr "$json"
+    fi
+    ;;
+  "pr list")
+    parse_opts "$@" || passthrough pr list "$@"
+    [ ${#positional[@]} -eq 0 ] && [ -n "$opt_json" ] || passthrough pr list "$@"
+    fields_supported "$opt_json" "$pr_fields_list" || passthrough pr list "$@"
+    repo="$(resolve_repo "$opt_repo")" || exit 1
+    # gh と同じく --author @me は認証ユーザー
+    if [ "$opt_author" = "@me" ]; then opt_author="$(viewer)" || exit 1; fi
+    # gh の --state closed はマージ済みを含まない (MERGED は別の状態)。REST の state=closed は両方を返すため merged_at で分ける
+    case "${opt_state:-open}" in open|closed|all) api_state="${opt_state:-open}" ;; merged) api_state=closed ;; *) passthrough pr list "$@" ;; esac
+    query="repos/$repo/pulls?state=$api_state&sort=created&direction=desc"
+    # --head は gh と同じく "owner:branch" と "branch" を受ける。"branch" は fork からの PR も含むため REST の head= (owner が要る) で
+    # 絞らず、取得後に .head.ref で絞る
+    head_ref=""
+    if [ -n "$opt_head" ]; then
+      case "$opt_head" in *:*) query="$query&head=$(uri "$opt_head")" ;; *) head_ref="$opt_head" ;; esac
+    fi
+    [ -z "$opt_base" ] || query="$query&base=$(uri "$opt_base")"
+    # REST の pulls は label で絞れないため、--label は取得後に名前で絞る (全部の label を持つもの)。ページごとに絞り、limit 件揃ったら止める
+    list="$(rest_list_until "$query" '
+      map(select(if $state == "merged" then .merged_at != null elif $state == "closed" then .merged_at == null else true end))
+      | map(select($author == "" or (.user.login == $author) or (.user.login == ($author | ltrimstr("app/") + "[bot]"))))
+      | map(select($head == "" or .head.ref == $head))
+      | map(select(. as $pr | all($labels[]; . as $l | any($pr.labels[]; .name == $l))))' "$(limit_or_default)" \
+      --arg state "${opt_state:-open}" --arg author "$opt_author" --arg head "$head_ref" \
+      --argjson labels "$(jq -cn '$ARGS.positional' --args ${opt_labels[@]+"${opt_labels[@]}"})")" || die "PR の一覧を取得できません"
+    emit_json "$(printf '%s' "$list" | jq "$jq_pr_base"' map(pr_base)')" "$opt_json" "$opt_jq"
+    ;;
+  "pr checks")
+    parse_opts "$@" || passthrough pr checks "$@"
+    [ -n "$opt_json" ] || passthrough pr checks "$@"
+    fields_supported "$opt_json" "$checks_fields" || passthrough pr checks "$@"
+    resolve_target "$opt_repo" "${positional[0]:-}"
+    sha="$(rest "repos/$repo/pulls/$number" --jq .head.sha)" || die "PR #$number を取得できません"
+    json="$(pr_checks_json "$repo" "$sha")" || exit 1
+    emit_json "$json" "$opt_json" "$opt_jq"
+    ;;
+  "issue view")
+    parse_opts "$@" || passthrough issue view "$@"
+    [ ${#positional[@]} -eq 1 ] || passthrough issue view "$@"
+    resolve_target "$opt_repo" "${positional[0]}"
+    if [ -n "$opt_json" ]; then
+      fields_supported "$opt_json" "$issue_fields_view" || passthrough issue view "$@"
+      json="$(issue_view_json "$repo" "$number" "$opt_json")" || exit 1
+      emit_json "$json" "$opt_json" "$opt_jq"
+    else
+      json="$(issue_view_json "$repo" "$number" comments)" || exit 1
+      if [ "$opt_comments" = true ]; then render_comments "$json"; else render_plain issue "$json"; fi
+    fi
+    ;;
+  "issue list")
+    parse_opts "$@" || passthrough issue list "$@"
+    [ ${#positional[@]} -eq 0 ] && [ -n "$opt_json" ] || passthrough issue list "$@"
+    fields_supported "$opt_json" "$issue_fields_base" || passthrough issue list "$@"
+    repo="$(resolve_repo "$opt_repo")" || exit 1
+    if [ "$opt_author" = "@me" ]; then opt_author="$(viewer)" || exit 1; fi
+    case "${opt_state:-open}" in open|closed|all) ;; *) passthrough issue list "$@" ;; esac
+    query="repos/$repo/issues?state=${opt_state:-open}&sort=created&direction=desc"
+    # REST の issues の labels= はカンマ区切りで「全部を持つ」の意味 (gh と同じ)
+    [ ${#opt_labels[@]} -eq 0 ] || query="$query&labels=$(uri "$(IFS=,; printf '%s' "${opt_labels[*]}")")"
+    [ -z "$opt_author" ] || query="$query&creator=$(uri "$opt_author")"
+    # REST の issues は PR も返すため除き、ページごとに limit 件揃ったら止める
+    list="$(rest_list_until "$query" 'map(select(.pull_request == null))' "$(limit_or_default)")" || die "issue の一覧を取得できません"
+    emit_json "$(printf '%s' "$list" | jq "$jq_issue_base"' map(issue_base)')" "$opt_json" "$opt_jq"
+    ;;
+  "pr diff")
+    parse_opts "$@" || passthrough pr diff "$@"
+    [ "$opt_comments" = false ] && [ -z "$opt_json" ] || passthrough pr diff "$@"
+    resolve_target "$opt_repo" "${positional[0]:-}"
+    rest -H "Accept: application/vnd.github.v3.diff" "repos/$repo/pulls/$number" || die "PR #$number の diff を取得できません"
+    ;;
+  "pr create")
+    parse_write_opts "$@" || passthrough pr create "$@"
+    [ ${#positional[@]} -eq 0 ] && [ -n "$w_title" ] && [ "$w_body_given" = true ] || passthrough pr create "$@"
+    repo="$(resolve_repo "$opt_repo")" || exit 1
+    head_branch="${w_head:-$(git rev-parse --abbrev-ref HEAD 2>/dev/null)}"
+    [ -n "$head_branch" ] && [ "$head_branch" != "HEAD" ] || die "head のブランチを解決できません"
+    base_branch="${w_base:-$(rest "repos/$repo" --jq .default_branch)}" || die "リポジトリ $repo を取得できません"
+    created="$(jq -n --arg title "$w_title" --arg body "$w_body" --arg head "$head_branch" --arg base "$base_branch" --argjson draft "$w_draft" \
+      '{title: $title, body: $body, head: $head, base: $base, draft: $draft}' | rest -X POST "repos/$repo/pulls" --input -)" || die "PR を作成できません"
+    if [ ${#w_labels[@]} -gt 0 ]; then
+      jq -n --args '{labels: $ARGS.positional}' "${w_labels[@]}" | rest -X POST "repos/$repo/issues/$(printf '%s' "$created" | jq -r .number)/labels" --input - >/dev/null || die "label を付けられません"
+    fi
+    printf '%s' "$created" | jq -r .html_url
+    ;;
+  "pr comment"|"issue comment")
+    parse_write_opts "$@" || passthrough "$sub1" "$sub2" "$@"
+    [ ${#positional[@]} -eq 1 ] && [ "$w_body_given" = true ] || passthrough "$sub1" "$sub2" "$@"
+    resolve_target "$opt_repo" "${positional[0]}"
+    jq -n --arg body "$w_body" '{body: $body}' | rest -X POST "repos/$repo/issues/$number/comments" --input - --jq .html_url || die "コメントを投稿できません"
+    ;;
+  "pr edit")
+    parse_write_opts "$@" || passthrough pr edit "$@"
+    [ ${#positional[@]} -le 1 ] && { [ "$w_body_given" = true ] || [ -n "$w_title" ] || [ -n "$w_base" ] || [ ${#w_labels[@]} -gt 0 ]; } || passthrough pr edit "$@"
+    resolve_target "$opt_repo" "${positional[0]:-}"
+    # 本文・題名・base のどれかがある時だけ PATCH し、label だけの時は label の追加だけにする
+    if [ "$w_body_given" = true ] || [ -n "$w_title" ] || [ -n "$w_base" ]; then
+      jq -n --arg title "$w_title" --arg body "$w_body" --argjson body_given "$w_body_given" --arg base "$w_base" \
+        '({} | if $title != "" then . + {title: $title} else . end | if $body_given then . + {body: $body} else . end | if $base != "" then . + {base: $base} else . end)' \
+        | rest -X PATCH "repos/$repo/pulls/$number" --input - --jq .html_url || die "PR を更新できません"
+    else
+      rest "repos/$repo/pulls/$number" --jq .html_url || die "PR #$number を取得できません"
+    fi
+    if [ ${#w_labels[@]} -gt 0 ]; then
+      jq -n --args '{labels: $ARGS.positional}' "${w_labels[@]}" | rest -X POST "repos/$repo/issues/$number/labels" --input - >/dev/null || die "label を付けられません"
+    fi
+    ;;
+  "pr close")
+    parse_write_opts "$@" || passthrough pr close "$@"
+    [ ${#positional[@]} -le 1 ] || passthrough pr close "$@"
+    resolve_target "$opt_repo" "${positional[0]:-}"
+    if [ "$w_body_given" = true ]; then
+      jq -n --arg body "$w_body" '{body: $body}' | rest -X POST "repos/$repo/issues/$number/comments" --input - >/dev/null || die "コメントを投稿できません"
+    fi
+    rest -X PATCH "repos/$repo/pulls/$number" -f state=closed --jq '"✓ Closed pull request #\(.number) (\(.title))"' >&2 || die "PR を close できません"
+    ;;
+  "issue create")
+    parse_write_opts "$@" || passthrough issue create "$@"
+    [ ${#positional[@]} -eq 0 ] && [ -n "$w_title" ] && [ "$w_body_given" = true ] || passthrough issue create "$@"
+    repo="$(resolve_repo "$opt_repo")" || exit 1
+    jq -n --arg title "$w_title" --arg body "$w_body" --args '{title: $title, body: $body, labels: $ARGS.positional}' "${w_labels[@]}" \
+      | rest -X POST "repos/$repo/issues" --input - --jq .html_url || die "issue を作成できません"
+    ;;
+  "issue close")
+    parse_write_opts "$@" || passthrough issue close "$@"
+    [ ${#positional[@]} -eq 1 ] || passthrough issue close "$@"
+    resolve_target "$opt_repo" "${positional[0]}"
+    if [ "$w_body_given" = true ]; then
+      jq -n --arg body "$w_body" '{body: $body}' | rest -X POST "repos/$repo/issues/$number/comments" --input - >/dev/null || die "コメントを投稿できません"
+    fi
+    case "${w_reason:-completed}" in
+      completed) api_reason=completed ;;
+      "not planned") api_reason=not_planned ;;
+      *) passthrough issue close "$@" ;;
+    esac
+    rest -X PATCH "repos/$repo/issues/$number" -f state=closed -f state_reason="$api_reason" --jq '"✓ Closed issue #\(.number) (\(.title))"' >&2 || die "issue を close できません"
+    ;;
+  "api graphql")
+    # shellcheck source=graphql.sh
+    . "$(dirname "$self")/graphql.sh"
+    graphql_main "$@"
+    ;;
+  *)
+    passthrough "$sub1" "$sub2" "$@"
+    ;;
+esac

@@ -1,0 +1,146 @@
+#!/bin/bash
+
+# claude-pretooluse-hook-push-guard
+#
+# Claude Code の PreToolUse フックとして動作し、git push のうち以下をブロックする:
+#   1. force push（-f / --force / --force-with-lease / refspec 先頭の +）… 全ブランチ対象
+#   2. main ブランチへの push
+#       - 明示 refspec が main を指す（git push origin main / HEAD:main / refs/heads/main 等）
+#       - ブランチ未指定 push（git push / git push origin / git push -u origin / git push origin HEAD）で
+#         現在ブランチが main の場合
+#   ブロック時は、安全な手順をガイドするメッセージを返す。
+#
+# 使い方:
+#   settings.json の hooks.PreToolUse の "matcher":"Bash" ブロックに登録して使用する。
+#   標準入力から JSON（tool_name, tool_input.command, cwd）を受け取る。
+#
+# 動作:
+#   - Bash 以外、または "git push" を含まないコマンドは exit 0（許可）
+#   - 複合コマンド（; && ||）は分割して各セグメントを個別に検査
+#   - ブロック時は exit 2、stderr/stdout の両方にガイドメッセージを出力
+#   - 現在ブランチ判定は JSON の cwd（無ければ $PWD）で git symbolic-ref を実行
+#
+# デバッグ:
+#   PUSH_GUARD_DEBUG=1 を設定すると set -x が有効になる
+#
+# ヘルプ:
+#   claude-pretooluse-hook-push-guard --help
+#
+# テスト方法:
+#   echo '{"tool_name":"Bash","tool_input":{"command":"git push origin main"}}'    | claude-pretooluse-hook-push-guard  # exit 2
+#   echo '{"tool_name":"Bash","tool_input":{"command":"git push -f origin feat"}}' | claude-pretooluse-hook-push-guard  # exit 2
+#   echo '{"tool_name":"Bash","tool_input":{"command":"git push origin feat"}}'    | claude-pretooluse-hook-push-guard  # exit 0
+#   bash test-claude-pretooluse-hook-push-guard.sh
+#
+# 既知の制限:
+#   - 値を取るオプション（-o <value> 等）はフラグ値も positional として粗く扱う。main 判定の結論には影響しにくい
+#   - 変数展開（$BRANCH 等）は展開前の文字列を検査するため検出不可
+#   - 保護対象は main のみ（master 等は対象外）
+#   - いずれも settings.json の deny パターン（force 系）が第一防衛線として併存する
+#
+# 依存: jq, git
+
+set -euo pipefail
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  sed -n '3,40p' "$0"
+  exit 0
+fi
+
+if [ "${PUSH_GUARD_DEBUG:-}" = "1" ]; then
+  set -x
+fi
+
+input=$(cat)
+tool_name=$(echo "$input" | jq -r '.tool_name' 2>/dev/null || echo "")
+
+if [ "$tool_name" != "Bash" ]; then
+  exit 0
+fi
+
+command=$(echo "$input" | jq -r '.tool_input.command' 2>/dev/null || echo "")
+cwd=$(echo "$input" | jq -r '.cwd // empty' 2>/dev/null || echo "")
+[ -z "$cwd" ] && cwd="$PWD"
+
+# git push を含まないコマンドはスキップ
+if [[ "$command" != *"git push"* ]]; then
+  exit 0
+fi
+
+GUIDE="BLOCKED: main への直接 push / force push は禁止です。
+次の手順で進めてください:
+  1. 新しいブランチを切る（git switch -c <branch>）
+  2. リモートの同名ブランチや必要な他ブランチを git fetch してマージで取り込む
+  3. その作業ブランチに push する（main へは push しない。PR でマージする）"
+
+block() {
+  echo "$GUIDE" >&2
+  echo "$GUIDE"
+  exit 2
+}
+
+# 引数なし push の main 判定に使う現在ブランチ（git リポジトリ外なら空文字）
+current_branch=$(git -C "$cwd" symbolic-ref --short HEAD 2>/dev/null || echo "")
+
+check_segment() {
+  local seg="$1"
+
+  # git push を含まないセグメントはスキップ
+  if [[ "$seg" != *"git push"* ]]; then
+    return 0
+  fi
+
+  # 1. force push（全ブランチ）
+  if [[ "$seg" =~ (^|[[:space:]])(-f|--force|--force-with-lease)([[:space:]=]|$) ]]; then
+    block
+  fi
+  # refspec 先頭の +（git push origin +main / +HEAD:main 等）
+  if [[ "$seg" =~ (^|[[:space:]])\+[A-Za-z0-9_./-]+ ]]; then
+    block
+  fi
+
+  # 2-a. 明示 refspec が main（main / :main / /main を語境界で検出）
+  if [[ "$seg" =~ (^|[[:space:]:/])main([[:space:]]|$) ]]; then
+    block
+  fi
+
+  # 2-b. 現在ブランチが main で、明示の別ブランチ refspec が無い push
+  if [ "$current_branch" = "main" ]; then
+    local rest="${seg#*git push}"
+    local toks=()
+    # メインループで IFS=$'\n' にしているため、ここでは空白分割に戻して read する
+    IFS=$' \t' read -ra toks <<< "$rest"
+    local positionals=()
+    local t
+    for t in "${toks[@]:-}"; do
+      [ -z "$t" ] && continue
+      [[ "$t" == -* ]] && continue
+      positionals+=("$t")
+    done
+    # positionals[0]=remote, positionals[1..]=refspec
+    if [ "${#positionals[@]}" -le 1 ]; then
+      block # refspec 無し → 現在ブランチ(main)を push
+    else
+      # refspec に HEAD があれば現在ブランチ(main)を push
+      local i
+      for ((i = 1; i < ${#positionals[@]}; i++)); do
+        if [ "${positionals[$i]}" = "HEAD" ]; then
+          block
+        fi
+      done
+    fi
+  fi
+}
+
+# 複合コマンドを ; && || で分割して各セグメントを検査
+temp_command="${command//;/$'\n'}"
+temp_command="${temp_command//&&/$'\n'}"
+temp_command="${temp_command//\|\|/$'\n'}"
+
+IFS=$'\n'
+for segment in $temp_command; do
+  [[ -z "$(echo "$segment" | tr -d '[:space:]')" ]] && continue
+  check_segment "$segment"
+done
+
+exit 0

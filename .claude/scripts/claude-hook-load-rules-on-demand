@@ -1,0 +1,314 @@
+#!/usr/bin/env bash
+#
+# claude-hook-load-rules-on-demand - `load: on-demand` の rule を、`match:` に一致したツール呼び出しの時だけ
+# additionalContext で注入する hook (Claude Code / Codex CLI 共通。PreToolUse・PostToolUseFailure・PermissionDenied・SessionStart)
+#
+# 背景: ~/.claude/rules の paths 無し rule は全セッションの固定費として毎回ロードされる。後からリカバリーできる rule は
+# Claude Code が自動ロードしない ~/.claude/documents/rules に置いて frontmatter に `load: on-demand` と `match:` (ツール呼び出しの
+# ERE) を書く。この hook が、ツール呼び出しの判定材料 (`<tool>:<本文>`) が `match:` に一致した rule の本文をその場で注入する。
+# 判定は正規表現だけで行い、外部の判定 API には問わない (Jev を外した決定: ~/.claude/documents/adr/0085-remove-jev-and-return-to-claude-native-hooks.md。
+# 元の設計: ~/.claude/documents/adr/0067-load-recoverable-rules-on-demand-by-jev-hook.md)。
+# コマンドを実行する前に読ませる必要がある rule (課金リソースの作成・secret の上書き・rebase・PR 作成の前に止めるもの) は、
+# frontmatter に `block: once` を書く。`match:` に一致したツール呼び出しをセッションで最初の 1 回だけ実行前に止め (exit 2)、
+# 本文を stderr で届ける。
+#
+# 入力 (stdin): hook JSON。`hook_event_name` で分岐する (無ければ `tool_name` があれば PreToolUse として扱う。
+#   codex-cli 0.154.0 の入力には hook_event_name・session_id・tool_name が Claude Code と同じ名前で入ることを 2026-09-19 に実測した)
+#   UserPromptSubmit: 何もしない (発言の内容で rule を選ぶ判定は Jev と共に外した。発言で読ませたい rule は常時ロードか
+#                     skill 本文からの参照にする)。登録が残っている環境でも exit 0 で終わる
+#   PreToolUse:       `tool_name` と `tool_input` から判定材料 (`<tool>:<本文>`) を作る。Bash は command、Agent は
+#                     prompt、Workflow は script、Skill は skill 名、Read は file_path、Write は file_path と content、
+#                     Edit は file_path と new_string (スクリプトファイルに書いた secret の上書き・rebase も、`bash ./tmp/x.sh` の
+#                     実行時ではなく書く時に `match:` で当てるため)。Codex のファイル編集ツール apply_patch (tool_input.command に
+#                     パッチ本文。 https://learn.chatgpt.com/docs/hooks ) は `Edit:<パッチ本文>` として照合する。
+#                     `match:` (ERE) に一致した rule のうち注入済みでないものを注入する。`block: once` の rule に一致し、この状態
+#                     ファイルでまだ止めていなければ、本文を stderr に書いて exit 2 で止める (下記「止める rule」)
+#   PostToolUseFailure / PermissionDenied (Claude Code のみ。Codex に同じイベントは無い):
+#                     判定材料は `<event>:<tool>:` に、deny なら `denied_by=<値>`、Bash なら `command: <コマンド>` を足したもの。
+#                     ツール呼び出しが失敗した・auto mode が deny した時に読むべき rule (`match:` を
+#                     `^(PostToolUseFailure|PermissionDenied):` で書く) を初回の失敗に注入する (Bash の非 0 終了はすべて
+#                     PostToolUseFailure になり、「ブロックされた失敗か、ただの失敗か」は分けない)。失敗の出力 (error・tool_response) と
+#                     Bash 以外のツールの tool_input はファイルの中身を含み得るため判定材料に入れない
+#   SessionStart:     (matcher compact で登録) 状態ファイルの「注入済み」「止めた」を空にする。compaction で hook が足した
+#                     コンテキストは要約されて消えるため、必要になった時にもう一度注入させる
+#   状態ファイルは session_id ごと (サブエージェントの中では session_id + agent_id ごと。サブエージェントは親と
+#   別のコンテキストのため、親で注入済みの rule もサブエージェントには改めて注入する)
+#   --reset:          SessionStart と同じ (Codex の SessionStart は matcher を持つため引数でも指定できるようにする)
+# 出力 (stdout): 注入する時だけ次の 1 行。それ以外は何も出さない
+#   {"hookSpecificOutput":{"hookEventName":"<event>","additionalContext":"<rule 本文>"}}
+#   additionalContext は 1 hook あたり 10,000 文字で切り詰められる (Claude Code) ため、本文の合計が 9,000 文字を
+#   超える分は状態ファイルの pending に残し、次のツール呼び出しで注入する。文字数は wc -m で数える。LANG が無い環境
+#   (launchd から起動したセッション等) ではバイト数になり日本語で約 3 倍に見積もるため、1 回に入る rule が減るだけで上限は超えない
+# exit code: 0 (ツール呼び出しを止めない)。
+#   `block: once` の rule で止める時だけ 2 (stdout には何も出さず、stderr に rule 本文を書く。Claude Code / Codex とも
+#   PreToolUse の exit 2 はツール呼び出しを止めて stderr を agent に返す)
+#
+# 止める rule (`block: once`):
+#   対象は PreToolUse で `match:` に一致した rule のうち、状態ファイルの blocked に無いもの。stderr に「このコマンドは
+#   実行していない。rule を読んで、必要な確認・書き直しをしてから実行し直す。同じセッションで同じ rule では二度と
+#   止めない」の案内と本文を書き、blocked と loaded に記録して exit 2 で終わる (同じツール呼び出しで match した他の rule は、
+#   実行し直した時の PreToolUse で通常どおり注入する)。2 回目以降の一致は止めず、rule は既にコンテキストにあるものとして
+#   扱う (常時ロードしていた時と同じ強さ。実行前に本文が届く点だけが違う)。コマンド本文は stderr に書かない
+#   (`gh secret set` の値が transcript に残らないようにする)
+#
+# 判定の流れ (PreToolUse):
+#   1. RULES_ON_DEMAND_DISABLE=1 なら何もしない
+#   2. rules-on-demand-index で索引を作り、`block: once` で未だ止めていない rule が `match:` に一致すれば止める (exit 2)
+#   3. 状態ファイルの注入済みを除いた候補のうち `match:` に一致する rule と、前回 9,000 文字の上限で見送った rule を注入する
+# 判定の流れ (PostToolUseFailure / PermissionDenied): 上の 1・3 と同じ (止める rule は無い)
+#
+# 外部送信: 無し。判定材料 (コマンド・ファイルの中身) はこの hook の中で正規表現の照合にだけ使う
+#
+# 並列実行: Claude Code が 1 メッセージで複数のツールを並列に呼ぶと、この hook も並列に動く。状態ファイルの更新は
+#   mkdir ロックの下で読み直してから差分を足す (他方が書いた loaded / pending を古い状態で上書きしない)
+#
+# 環境変数:
+#   RULES_ON_DEMAND_DISABLE          1 なら何もしない
+#   RULES_ON_DEMAND_RULES_DIR        rule のディレクトリ (既定 $HOME/.claude/documents/rules。それが無ければ
+#                                    $CLAUDE_PROJECT_DIR/.claude/documents/rules。テスト用)
+#   RULES_ON_DEMAND_STATE_DIR        状態ファイルの置き場 (既定 ${TMPDIR:-/tmp}/claude-rules-on-demand)
+#   RULES_ON_DEMAND_DEBUG_FILE       設定すると判定の内訳 (event・候補・注入した rule) を JSON 1 行で追記する。
+#                                    コマンドの本文も書くので共有しない場所に置く
+#
+# 冪等: 同じ入力には同じ判定を返す。副作用は状態ファイルの更新だけ
+#
+# 登録:
+#   Claude Code: ~/.claude/settings.json の hooks.PreToolUse (matcher "Bash|Agent|Workflow|Skill|Read|Write|Edit") に
+#                command として追加 (timeout 5)。hooks.PostToolUseFailure (matcher Bash) と hooks.PermissionDenied にも追加。
+#                hooks.SessionStart (matcher compact) に `--reset` 付きで追加
+#   Codex CLI:   ~/.codex/hooks.json の PreToolUse (^Bash$ と ^apply_patch$) に additionalContextLimit 0 で
+#                追加し、SessionStart に `--reset` 付きで追加。codex-hook-trusted-hash で trusted_hash を config.toml に書く
+#
+# テスト方法:
+#   bash test-claude-hook-load-rules-on-demand.sh
+#
+# 依存: bash 3.2 以上、jq、grep、rules-on-demand-index
+set -uo pipefail
+
+export PATH="$PATH:/opt/homebrew/bin:/usr/local/bin"
+
+if [ "${1:-}" = "--help" ] || [ "${1:-}" = "-h" ]; then
+  awk 'NR >= 3 { if ($0 !~ /^#/) { exit } ; print }' "$0"
+  exit 0
+fi
+
+[ "${RULES_ON_DEMAND_DISABLE:-}" != "1" ] || exit 0
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+INDEX_CMD="$SCRIPT_DIR/rules-on-demand-index"
+RULES_DIR="${RULES_ON_DEMAND_RULES_DIR:-$HOME/.claude/documents/rules}"
+# ユーザーグローバルの rule が無い環境 (castle の配布サブセットを置いたクラウドセッション。 https://github.com/bannzai/castle/issues/1546 ) では、
+# プロジェクトの .claude/documents/rules を読む
+if [ -z "${RULES_ON_DEMAND_RULES_DIR:-}" ] && [ ! -d "$RULES_DIR" ] && [ -d "${CLAUDE_PROJECT_DIR:-/nonexistent}/.claude/documents/rules" ]; then
+  RULES_DIR="$CLAUDE_PROJECT_DIR/.claude/documents/rules"
+fi
+STATE_DIR="${RULES_ON_DEMAND_STATE_DIR:-${TMPDIR:-/tmp}/claude-rules-on-demand}"
+CONTEXT_MAX_CHARS=9000
+
+command -v jq >/dev/null 2>&1 || exit 0
+[ -x "$INDEX_CMD" ] || exit 0
+
+INPUT="$(cat 2>/dev/null || true)"
+EVENT="$(printf '%s' "$INPUT" | jq -r '
+  .hook_event_name
+  // (if .tool_name != null then "PreToolUse" elif .prompt != null then "UserPromptSubmit" else empty end)
+' 2>/dev/null || true)"
+SESSION_ID="$(printf '%s' "$INPUT" | jq -r '.session_id // empty' 2>/dev/null || true)"
+[ -n "$SESSION_ID" ] || SESSION_ID="no-session"
+# サブエージェントの中で発火した hook は agent_id を持つ。サブエージェントは親と別のコンテキストなので、
+# 注入済みの記録も分ける (親で注入済みでもサブエージェントには入っていない)
+AGENT_ID="$(printf '%s' "$INPUT" | jq -r '.agent_id // empty' 2>/dev/null || true)"
+STATE_FILE="$STATE_DIR/$SESSION_ID${AGENT_ID:+-$AGENT_ID}.json"
+
+mkdir -p "$STATE_DIR" 2>/dev/null || exit 0
+
+# 状態: loaded = 注入済みの rule 名、pending = 注入すると判定したが 9,000 文字の上限で見送った rule 名 (次のツール呼び出しで
+# 注入する)、blocked = `block: once` で止めた rule 名 (loaded とは別に持つ)
+read_state() {
+  if [ -s "$STATE_FILE" ] && jq -e 'type == "object"' "$STATE_FILE" >/dev/null 2>&1; then
+    jq -c '.loaded //= [] | .pending //= [] | .blocked //= []' "$STATE_FILE"
+  else
+    printf '{"loaded":[],"pending":[],"blocked":[]}'
+  fi
+}
+
+# update_state <jq filter> [--argjson name value ...]: 状態ファイルをロックして読み直し、filter を当てて書き戻す。
+# 同じセッションの hook が並列に動いても (Claude Code が複数ツールを同時に呼ぶ時)、他方が書いた loaded / pending を
+# 古い STATE で上書きしない。ロックは mkdir で取り、最大 2 秒待つ。取れなければロック無しで進める (止めない)
+update_state() {
+  local filter="$1" lock="$STATE_FILE.lock" waited=0 current
+  shift
+  while ! mkdir "$lock" 2>/dev/null; do
+    if [ "$waited" -ge 20 ]; then break; fi
+    sleep 0.1
+    waited=$((waited + 1))
+  done
+  current="$(read_state)"
+  STATE="$(printf '%s' "$current" | jq -c "$@" "$filter" 2>/dev/null || printf '%s' "$current")"
+  printf '%s\n' "$STATE" >"$STATE_FILE.tmp" && mv "$STATE_FILE.tmp" "$STATE_FILE"
+  rmdir "$lock" 2>/dev/null
+}
+
+if [ "${1:-}" = "--reset" ] || [ "$EVENT" = "SessionStart" ]; then
+  update_state '.loaded = [] | .pending = [] | .blocked = []'
+  exit 0
+fi
+
+case "$EVENT" in
+  PreToolUse|PostToolUseFailure|PermissionDenied) ;;
+  *) exit 0 ;;
+esac
+
+INDEX="$("$INDEX_CMD" "$RULES_DIR" 2>/dev/null)" || exit 0
+[ "$(printf '%s' "$INDEX" | jq 'length')" -gt 0 ] 2>/dev/null || exit 0
+
+STATE="$(read_state)"
+CANDIDATES="$(jq -nc --argjson index "$INDEX" --argjson state "$STATE" '$index | map(select(.name as $n | ($state.loaded | index($n)) == null))')"
+# 前回の上限で見送った rule (まだ注入していないものだけ)。今回の判定結果と合わせて注入する
+PENDING="$(jq -nc --argjson c "$CANDIDATES" --argjson state "$STATE" '$c | map(select(.name as $n | ($state.pending | index($n)) != null))')"
+# 候補が無くても、まだ止めていない `block: once` の rule が残っていれば先へ進む (loaded でも実行前に 1 回は止める)
+UNBLOCKED="$(jq -nc --argjson index "$INDEX" --argjson state "$STATE" '$index | map(select(.block == "once" and ((.name as $n | $state.blocked | index($n)) == null))) | length')"
+[ "$(printf '%s' "$CANDIDATES" | jq 'length')" -gt 0 ] || [ "$UNBLOCKED" -gt 0 ] || exit 0
+
+KIND=""
+SUBJECT=""
+POOL="[]"
+INJECTED="[]"
+
+debug_append() {
+  [ -n "${RULES_ON_DEMAND_DEBUG_FILE:-}" ] || return 0
+  jq -nc --arg event "$EVENT" --arg kind "$KIND" --arg subject "$SUBJECT" --arg result "$1" \
+    --argjson pool "${POOL:-[]}" --argjson injected "${INJECTED:-[]}" \
+    '{event: $event, kind: $kind, subject: $subject, result: $result, pool: ($pool | map(.name)), injected: $injected}' \
+    >>"$RULES_ON_DEMAND_DEBUG_FILE" 2>/dev/null
+}
+
+if [ "$EVENT" = "PreToolUse" ]; then
+  KIND="tool call"
+  # 改行は空白にする。match: の ERE は `^Bash:.*gh issue create` のように 1 行前提で書き、複数行のコマンド
+  # (heredoc の後に続くコマンド等) でも 2 行目以降に一致させるため
+  SUBJECT="$(printf '%s' "$INPUT" | jq -r '
+    (.tool_name // "") as $tool
+    | (.tool_input // {}) as $i
+    | (if $tool == "Bash" then ($i.command // "")
+       elif $tool == "Agent" then ($i.prompt // $i.description // "")
+       elif $tool == "Workflow" then ($i.script // $i.scriptPath // $i.name // "")
+       elif $tool == "Skill" then ($i.skill // "")
+       elif $tool == "Read" then ($i.file_path // "")
+       elif $tool == "Write" then (($i.file_path // "") + " " + ($i.content // ""))
+       elif $tool == "Edit" then (($i.file_path // "") + " " + ($i.new_string // ""))
+       elif $tool == "apply_patch" then ($i.command // ($i | tostring))
+       else ($i | tostring)
+       end) as $text
+    # Codex のファイル編集ツール apply_patch (tool_input.command にパッチ本文) は Edit として照合する
+    | ($tool | if . == "apply_patch" then "Edit" else . end) as $kind
+    | if $tool == "" then "" else (($kind + ":" + $text) | gsub("\r?\n"; " ")) end
+  ' 2>/dev/null || true)"
+  [ -n "$SUBJECT" ] || exit 0
+else
+  KIND="failed tool call"
+  # ツール呼び出しの失敗 (PostToolUseFailure) と auto mode の deny (PermissionDenied)。判定材料は `<event>:<tool>:` に、
+  # deny なら denied_by、Bash ならコマンドを足したもの。失敗の出力 (error・tool_response) と Bash 以外のツールの tool_input は
+  # ファイルの中身を含み得るため判定材料に入れない
+  SUBJECT="$(printf '%s' "$INPUT" | jq -r --arg event "$EVENT" '
+    (.tool_name // "") as $tool
+    | (if $tool == "Bash" then (.tool_input.command // "") else "" end) as $cmd
+    | ([(if $event == "PermissionDenied" then "denied_by=" + (.denied_by // "unknown" | tostring) else empty end),
+        (if $cmd == "" then empty else "command: " + $cmd end)] | join(" ")) as $text
+    | if $tool == "" then "" else (($event + ":" + $tool + ":" + $text) | gsub("\r?\n"; " ")) end
+  ' 2>/dev/null || true)"
+  [ -n "$SUBJECT" ] || exit 0
+fi
+
+# match: に一致する候補
+POOL="$(printf '%s' "$CANDIDATES" | jq -c --arg subject "$SUBJECT" '
+  map(select(.match as $m | $m != null and $m != "" and ($subject | test($m))))
+' 2>/dev/null || printf '[]')"
+
+# 止める rule (`block: once`): PreToolUse で match に一致し、この状態ファイルでまだ止めていない rule があれば、
+# 本文を stderr に書いて exit 2 で止める。loaded に関わらず blocked で判定する (ヘッダー「止める rule」)
+if [ "$EVENT" = "PreToolUse" ]; then
+  BLOCKERS="$(jq -nc --argjson index "$INDEX" --argjson state "$STATE" --arg subject "$SUBJECT" '
+    $index | map(select(
+      .block == "once"
+      and (.match as $m | $m != null and $m != "" and ($subject | test($m)))
+      and (.name as $n | ($state.blocked | index($n)) == null)
+    ))
+  ' 2>/dev/null || printf '[]')"
+  if [ "$(printf '%s' "$BLOCKERS" | jq 'length')" -gt 0 ]; then
+    BLOCK_NAMES="$(printf '%s' "$BLOCKERS" | jq -c 'map(.name)')"
+    {
+      printf '[rules-on-demand] このツール呼び出しは実行していない。次の rule を読み、rule が求める確認・書き直しをしてから実行し直す。同じセッションで同じ rule ではもう止めない (2 回目以降はそのまま実行される)。\n'
+      while IFS=$'\t' read -r name path; do
+        [ -n "$name" ] || continue
+        [ -f "$path" ] || continue
+        printf '\n===== rule: %s (%s) =====\n' "$name" "$path"
+        if head -1 "$path" | grep -q '^---$'; then
+          awk 'NR == 1 { next } !done && /^---$/ { done = 1; next } done { print }' "$path"
+        else
+          cat "$path"
+        fi
+      done < <(printf '%s' "$BLOCKERS" | jq -r '.[] | [.name, .path] | @tsv')
+    } >&2
+    update_state '
+      .blocked = ((.blocked + $names) | unique)
+      | .loaded = ((.loaded + $names) | unique)
+      | .pending = (.pending - $names)
+    ' --argjson names "$BLOCK_NAMES"
+    INJECTED="$BLOCK_NAMES"
+    debug_append "blocked"
+    exit 2
+  fi
+fi
+
+# inject <pool JSON>: 本文を 9,000 文字まで連結して additionalContext で出し、注入した rule を状態に記録する。
+# 上限で見送った rule は pending に残す
+inject() {
+  local pool="$1" context="" name path body total=0 len injected="[]" skipped="[]"
+  while IFS=$'\t' read -r name path; do
+    [ -n "$name" ] || continue
+    [ -f "$path" ] || continue
+    if head -1 "$path" | grep -q '^---$'; then
+      body="$(awk 'NR == 1 { next } !done && /^---$/ { done = 1; next } done { print }' "$path")"
+    else
+      body="$(cat "$path")"
+    fi
+    len="$(printf '%s' "$body" | wc -m | tr -d ' ')"
+    if [ $((total + len + 100)) -gt "$CONTEXT_MAX_CHARS" ]; then
+      skipped="$(printf '%s' "$skipped" | jq -c --arg n "$name" '. + [$n]')"
+      continue
+    fi
+    context="$context"$'\n'"===== rule: $name ($path) ====="$'\n'"$body"$'\n'
+    total=$((total + len + 100))
+    injected="$(printf '%s' "$injected" | jq -c --arg n "$name" '. + [$n]')"
+  done < <(printf '%s' "$pool" | jq -r '.[] | [.name, .path] | @tsv')
+  INJECTED="$injected"
+  # 読み直した最新の状態に対して差分を足す (他の hook が並列に書いた loaded / pending を残す)
+  update_state '
+    .loaded = ((.loaded + $add) | unique)
+    | .pending = ((.pending - $add + $skipped) | unique)
+  ' --argjson add "$injected" --argjson skipped "$skipped"
+  [ "$(printf '%s' "$injected" | jq 'length')" -gt 0 ] || return 0
+  local lead
+  if [ "$KIND" = "failed tool call" ]; then
+    lead="このツール呼び出しの失敗・拒否に関係する rule を注入する。以下の rule に従い、次の行動 (代替手段への切り替え等) の前に必要な報告をする。"
+  else
+    lead="このツール呼び出しに関係する rule を注入する。以下の rule に従う。直前のツール呼び出しがこの rule に反していたら、今それを直す (再実行・編集・追記)。"
+  fi
+  jq -nc --arg event "$EVENT" --arg ctx "$lead"$'\n'"$context" \
+    '{hookSpecificOutput: {hookEventName: $event, additionalContext: $ctx}}'
+}
+
+# match した候補と、前回見送った rule を注入する (重複は除く)
+SELECTED="$(jq -nc --argjson p "$POOL" --argjson pending "$PENDING" '($p + $pending) | unique_by(.name)')"
+if [ "$(printf '%s' "$SELECTED" | jq 'length')" -gt 0 ]; then
+  inject "$SELECTED"
+  if [ "$(printf '%s' "$POOL" | jq 'length')" -gt 0 ]; then
+    debug_append "injected"
+  else
+    debug_append "injected_pending"
+  fi
+else
+  debug_append "none"
+fi
+exit 0

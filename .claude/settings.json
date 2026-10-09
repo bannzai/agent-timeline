@@ -1,0 +1,155 @@
+{
+  "model": "fable",
+  "modelSettings": {
+    "claude-opus-5-5": {
+      "effortLevel": "high"
+    },
+    "claude-opus-5": {
+      "effortLevel": "high"
+    },
+    "claude-sonnet-5-5": {
+      "effortLevel": "high"
+    },
+    "claude-fable-5-1": {
+      "effortLevel": "high"
+    },
+    "claude-fable-5": {
+      "effortLevel": "medium"
+    }
+  },
+  "outputStyle": "autonomous",
+  "advisorModel": "fable",
+  "alwaysThinkingEnabled": true,
+  "includeCoAuthoredBy": false,
+  "env": {
+    "BASH_DEFAULT_TIMEOUT_MS": "60000",
+    "BASH_MAX_TIMEOUT_MS": "600000",
+    "ENABLE_PROMPT_CACHING_1H": "1"
+  },
+  "permissions": {
+    "deny": [
+      "Bash(brew *)",
+      "Bash(git config *)",
+      "Bash(rm -rf *)",
+      "Bash(rm *)",
+      "Bash(sudo *)",
+      "Bash(gh repo delete *)",
+      "Bash(gh repo create *--public*)",
+      "Bash(gh repo new *--public*)",
+      "Bash(gh repo edit *--visibility*public*)",
+      "Bash(gh gist create *--public*)",
+      "Bash(gh gist create -p*)",
+      "Bash(gh gist create * -p*)",
+      "Bash(gh gist new *--public*)",
+      "Bash(gh gist new -p*)",
+      "Bash(gh gist new * -p*)",
+      "Bash(gh api *visibility=public*)",
+      "Bash(gh api *private=false*)",
+      "Bash(gh api *public=true*)",
+      "Bash(gh api *visibility*PUBLIC*)",
+      "Bash(gh status*)",
+      "Bash(gh pr status*)",
+      "Bash(gh issue status*)",
+      "Bash(git push --force *)",
+      "Bash(git push --force-with-lease *)",
+      "Bash(git push * --force-with-lease*)",
+      "Bash(git push -f *)",
+      "Read(.env*)",
+      "Read(.envrc)",
+      "Edit(.env*)",
+      "Read(**/secrets/**)",
+      "Edit(**/secrets/**)",
+      "Bash(tmux kill*)"
+    ]
+  },
+  "hooks": {
+    "SessionStart": [
+      {
+        "matcher": "startup|resume",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" != \"true\" ] || { bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/install-gh.sh\"; bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/enable-gh-shim.sh\"; bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/enable-git-hooks.sh\"; }",
+            "timeout": 600
+          }
+        ]
+      },
+      {
+        "matcher": "compact",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" != \"true\" ] || bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/claude-hook-load-rules-on-demand\" --reset"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" != \"true\" ] || bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/claude-pre-tooluse-deny-check\""
+          },
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" != \"true\" ] || bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/claude-pretooluse-hook-gh-api-guard\""
+          },
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" != \"true\" ] || bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/claude-pretooluse-hook-push-guard\""
+          },
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" != \"true\" ] || python3 \"$CLAUDE_PROJECT_DIR/.claude/scripts/claude-pretooluse-hook-git-hook-bypass-guard\""
+          }
+        ]
+      },
+      {
+        "matcher": "Bash|Agent|Workflow|Skill|Read|Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" != \"true\" ] || bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/claude-hook-load-rules-on-demand\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PostToolUseFailure": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" != \"true\" ] || bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/claude-hook-load-rules-on-demand\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "PermissionDenied": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "[ \"$CLAUDE_CODE_REMOTE\" != \"true\" ] || bash \"$CLAUDE_PROJECT_DIR/.claude/scripts/claude-hook-load-rules-on-demand\"",
+            "timeout": 5
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "prompt",
+            "prompt": "You review the final message of a coding agent's turn before it stops. Input (hook JSON): $ARGUMENTS\n\nRULE 0 (overrides everything below): if the input's `stop_hook_active` is true, respond exactly {\"ok\": true}. The message was already reviewed once in this turn; never block twice, whatever the message says.\n\nOtherwise judge ONLY the text of `last_assistant_message`. Block only when that text itself shows one of the patterns below. Never block for missing evidence, unverified claims, or anything you would need the rest of the conversation to confirm; those cases are {\"ok\": true}. Respond {\"ok\": false, \"reason\": \"<check name>: <1-2 sentences in Japanese telling the agent what to fix in the report, then to write the full report again>\"} when a check fails; otherwise {\"ok\": true}. Name only the first failing check.\n\nChecks 1 and 2 apply only when the message is a completion report (it reports finished work such as a PR, commit, fix, or deliverable); questions, progress notes, error reports, and plain answers pass checks 1 and 2. Checks 3, 4 and 5 apply to every message.\n1. report-undone-scope: the report mentions nothing about what was NOT done (no mention of scope left out, unverified parts, or artifacts not created such as PR/commit/issue). Fail only when the report also hints that the request had more parts than were delivered (e.g. mentions remaining stages, later steps, or items it chose not to do without saying so explicitly). Reference: ~/.claude/documents/rules/report-undone-scope-in-completion.md\n2. keep-agent-doable-items-out-of-user-tasks: the report lists, as tasks or checks for the user, items the agent could do itself with its own tools (gh, git, running tests or builds, reading files or logs, editing a PR body). Reference: ~/.claude/CLAUDE.md「規約」\n3. continue-when-work-remains: the message ends by announcing work the agent itself will do next or lists remaining items for itself, without any reason to stop (no question to the user, no approval request, no blocker such as permission denied or user-only action, nothing it is waiting for such as CI, review, or a background task). Reference: ~/.claude/output-styles/autonomous.md「自走」\n4. do-own-work-before-asking-user: the message ends by asking the user for permission to continue ordinary work that is already in scope (continue implementing, fix, run tests, commit, push, create the PR, keep investigating), rather than asking about a destructive operation, a write outside the request, a specification choice, or a scope expansion. Reference: ~/.claude/CLAUDE.md「自律性と確認の境界」\n5. respond-in-japanese: the prose the agent wrote itself (explanations, headings, bullets) is in a language other than Japanese. Ignore code blocks, commands, paths, URLs, and quoted error or review text. Reference: ~/.claude/CLAUDE.md「基本ルール」",
+            "timeout": 30
+          }
+        ]
+      }
+    ]
+  }
+}

@@ -1,0 +1,160 @@
+#!/bin/bash
+
+# claude-pretooluse-hook-gh-api-guard
+#
+# Claude Code の PreToolUse フックとして動作し、
+# gh api コマンドによる危険な操作（リポジトリ削除、ブランチ保護解除等）をブロックする。
+#
+# 使い方:
+#   settings.json の hooks.PreToolUse に登録して使用する。
+#   標準入力からJSON（tool_name, tool_input.command）を受け取る。
+#
+# 動作:
+#   - Bashツール以外は即座にexit 0（許可）
+#   - "gh api" を含まないコマンドは即座にexit 0（許可）
+#   - REST DELETE + 危険なパス → exit 2（ブロック）
+#   - GraphQL の危険な mutation → exit 2（ブロック）
+#   - 複合コマンド（;, &&, ||）は分割して各セグメントを個別チェック
+#
+# デバッグ:
+#   GH_API_GUARD_DEBUG=1 を設定すると set -x が有効になる
+#
+# テスト方法:
+#   # ブロックされるコマンド（exit code 2）
+#   echo '{"tool_name":"Bash","tool_input":{"command":"gh api -X DELETE /repos/owner/repo"}}' | claude-pretooluse-hook-gh-api-guard
+#   echo '{"tool_name":"Bash","tool_input":{"command":"gh api --method DELETE /repos/owner/repo/branches/main/protection"}}' | claude-pretooluse-hook-gh-api-guard
+#   echo '{"tool_name":"Bash","tool_input":{"command":"gh api graphql -f query=\"mutation { deleteRepository(input: {}) { clientMutationId } }\""}}' | claude-pretooluse-hook-gh-api-guard
+#   echo '{"tool_name":"Bash","tool_input":{"command":"echo ok && gh api -X DELETE /repos/owner/repo"}}' | claude-pretooluse-hook-gh-api-guard
+#
+#   # 許可されるコマンド（exit code 0）
+#   echo '{"tool_name":"Bash","tool_input":{"command":"gh api /repos/owner/repo/issues"}}' | claude-pretooluse-hook-gh-api-guard
+#   echo '{"tool_name":"Bash","tool_input":{"command":"gh api -X POST /repos/owner/repo/issues -f title=test"}}' | claude-pretooluse-hook-gh-api-guard
+#   echo '{"tool_name":"Bash","tool_input":{"command":"git status"}}' | claude-pretooluse-hook-gh-api-guard
+#   echo '{"tool_name":"Bash","tool_input":{"command":"gh api -X DELETE /repos/owner/repo/issues/1"}}' | claude-pretooluse-hook-gh-api-guard
+#   echo '{"tool_name":"Read","tool_input":{}}' | claude-pretooluse-hook-gh-api-guard
+#
+# 既知の制限:
+#   - gh api --input - でstdinからクエリを渡す場合、mutation名はコマンド文字列に含まれないため検出不可
+#   - gh api graphql -f query=@file.graphql でファイル指定の場合も同様
+#   - 変数展開（$METHOD 等）は展開前の文字列を検査するため検出不可
+#   - いずれも permissions.ask による確認ダイアログが第一防衛線として機能する
+#
+# 依存: jq
+
+set -euo pipefail
+
+if [[ "${GH_API_GUARD_DEBUG:-}" == "1" ]]; then
+  set -x
+fi
+
+input=$(cat)
+tool_name=$(echo "$input" | jq -r '.tool_name' 2>/dev/null || echo "")
+
+if [[ "$tool_name" != "Bash" ]]; then
+  exit 0
+fi
+
+command=$(echo "$input" | jq -r '.tool_input.command' 2>/dev/null || echo "")
+
+# gh api を含まないコマンドはスキップ
+if [[ "$command" != *"gh api"* ]]; then
+  exit 0
+fi
+
+# 危険な REST DELETE パスパターン
+# /repos/{owner}/{repo} のみ（サブパスなし）はリポジトリ削除
+DANGEROUS_DELETE_PATTERNS=(
+  '/repos/[^/]+/[^/]+/branches/.+/protection'
+  '/repos/[^/]+/[^/]+/hooks/'
+  '/repos/[^/]+/[^/]+/releases/'
+  '/repos/[^/]+/[^/]+/actions/secrets/'
+  '/repos/[^/]+/[^/]+/actions/variables/'
+  '/repos/[^/]+/[^/]+/environments/'
+  '/repos/[^/]+/[^/]+/collaborators/'
+  '/repos/[^/]+/[^/]+/actions/runners/'
+  '/orgs/[^/]+/actions/secrets/'
+  '/orgs/[^/]+/actions/variables/'
+  '/orgs/[^/]+/teams/'
+  '/orgs/[^/]+/members/'
+)
+
+# 危険な GraphQL mutation 名
+DANGEROUS_MUTATIONS=(
+  'deleteRepository'
+  'deleteBranchProtectionRule'
+  'deleteRef'
+  'deleteRelease'
+  'deleteEnvironment'
+  'deleteProjectV2'
+)
+
+# セグメントが REST DELETE で危険なパスを含むかチェック
+check_rest_delete() {
+  local segment="$1"
+
+  # -X DELETE または --method DELETE が含まれるかチェック
+  if [[ "$segment" =~ (-X[[:space:]]+DELETE|--method[[:space:]]+DELETE) ]]; then
+    # リポジトリ削除の特殊チェック: /repos/X/Y でサブパスなし
+    # /repos/X/Y にマッチし、/repos/X/Y/ にマッチしない場合のみブロック
+    if [[ "$segment" =~ /repos/[^/[:space:]]+/[^/[:space:]]+ ]] && ! [[ "$segment" =~ /repos/[^/[:space:]]+/[^/[:space:]]+/ ]]; then
+      local msg="BLOCKED: gh api DELETE on repository path detected (repository deletion). Use the GitHub web UI for this operation."
+      echo "$msg" >&2
+      echo "$msg"
+      exit 2
+    fi
+
+    # その他の危険なパスパターンチェック
+    for pattern in "${DANGEROUS_DELETE_PATTERNS[@]}"; do
+      if [[ "$segment" =~ $pattern ]]; then
+        local msg="BLOCKED: gh api DELETE on dangerous path detected (pattern: $pattern). Use the GitHub web UI for this operation."
+        echo "$msg" >&2
+        echo "$msg"
+        exit 2
+      fi
+    done
+  fi
+}
+
+# セグメントが危険な GraphQL mutation を含むかチェック
+check_graphql_mutation() {
+  local segment="$1"
+
+  for mutation in "${DANGEROUS_MUTATIONS[@]}"; do
+    if [[ "$segment" == *"$mutation"* ]]; then
+      local msg="BLOCKED: gh api GraphQL mutation '$mutation' detected. Use the GitHub web UI for this operation."
+      echo "$msg" >&2
+      echo "$msg"
+      exit 2
+    fi
+  done
+}
+
+# セグメントをチェック
+check_segment() {
+  local segment="$1"
+
+  # 先頭・末尾の空白を削除
+  segment="${segment#"${segment%%[![:space:]]*}"}"
+  segment="${segment%"${segment##*[![:space:]]}"}"
+
+  # gh api を含まないセグメントはスキップ
+  if [[ "$segment" != *"gh api"* ]]; then
+    return 0
+  fi
+
+  check_rest_delete "$segment"
+  check_graphql_mutation "$segment"
+}
+
+# 複合コマンドを分割して各セグメントをチェック
+temp_command="${command//;/$'\n'}"
+temp_command="${temp_command//&&/$'\n'}"
+temp_command="${temp_command//\|\|/$'\n'}"
+
+IFS=$'\n'
+for segment in $temp_command; do
+  [[ -z "$(echo "$segment" | tr -d '[:space:]')" ]] && continue
+  check_segment "$segment"
+done
+
+exit 0
