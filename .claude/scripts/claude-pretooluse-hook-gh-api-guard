@@ -92,6 +92,10 @@ DANGEROUS_MUTATIONS=(
 check_rest_delete() {
   local segment="$1"
 
+  # gh api は先頭スラッシュの無い endpoint (repos/owner/repo) も受け付けるため、/ 付きに正規化してから判定する
+  # (Codex ローカルレビューの指摘。 https://github.com/bannzai/castle/pull/1579 )
+  segment="$(printf '%s' "$segment" | sed -E "s#(^|[[:space:]\"'=])(repos|orgs)/#\\1/\\2/#g")"
+
   # -X DELETE または --method DELETE が含まれるかチェック
   if [[ "$segment" =~ (-X[[:space:]]+DELETE|--method[[:space:]]+DELETE) ]]; then
     # リポジトリ削除の特殊チェック: /repos/X/Y でサブパスなし
