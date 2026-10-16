@@ -19,8 +19,8 @@ tmux の複数 window で Claude Code / Codex を並列に走らせている開�
 
 | 指標 | 計測元 (skill / コマンド) | 継続のしきい値 | 打ち切り条件 | 転換の条件 |
 | --- | --- | --- | --- | --- |
-| 14 日間でサーバーを起動した日数 (bannzai 自身) | アプリが起動のたびに `~/.agent-timeline/usage.jsonl` へ 1 行書く。`jq -r 'select(.event == "start") \| .at[0:10]' ~/.agent-timeline/usage.jsonl \| sort -u \| wc -l` を直近 14 日分で数える | 4 日以上 | 2 回連続で 2 日未満 | 起動は 4 日以上だが返信の送信が 0 件なら、返信機能を外して閲覧専用に絞る |
-| 14 日間に返信で送った指示の件数 (bannzai 自身) | 同ファイルの `event == "reply"` の行数 | 10 件以上 | (起動日数の打ち切り条件に従う) | 上の行と同じ |
+| 14 日間でサーバーを起動した日数 (bannzai 自身) | アプリが起動のたびに `~/.agent-timeline/usage.jsonl` へ 1 行書く。判定日に `jq -r --arg from "$(date -v-14d +%F)" 'select(.event == "start" and .at[0:10] >= $from) \| .at[0:10]' ~/.agent-timeline/usage.jsonl \| sort -u \| wc -l` で、判定日の 14 日前以降の日数を数える (それより前の記録は数えない) | 4 日以上 | 2 回連続で 2 日未満 | 起動は 4 日以上だが返信の送信が 0 件なら、返信機能を外して閲覧専用に絞る |
+| 14 日間に返信で送った指示の件数 (bannzai 自身) | 同ファイルの `event == "reply"` の行数を、上と同じ `.at[0:10] >= $from` で判定日の 14 日前以降に絞って数える (`jq -r --arg from "$(date -v-14d +%F)" 'select(.event == "reply" and .at[0:10] >= $from) \| .at' ~/.agent-timeline/usage.jsonl \| wc -l`) | 10 件以上 | (起動日数の打ち切り条件に従う) | 上の行と同じ |
 | GitHub の star 数 | `gh api repos/bannzai/agent-timeline --jq .stargazers_count` | 公開の告知から 28 日で 10 以上 | star では打ち切らない (自分が使っていれば継続) | 28 日で 30 以上なら npm への公開 (`npx agent-timeline`) と導入手順の整備に進む |
 
 ## 必要な機能
