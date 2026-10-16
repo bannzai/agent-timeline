@@ -42,7 +42,3 @@ bannzai.app@gmail.com
 ## ライセンス
 
 [MIT](LICENSE)
-
-## クラウドセッションの動作確認
-
-bannzai/castle#1554 のクラウド起動の経路で作った変更。
