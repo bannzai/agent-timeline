@@ -14,10 +14,10 @@ Claude Code / Codex のセッションを X のタイムライン風に表示す
 - agent-timeline は public リポジトリのため、外部のマシンは GitHub Actions (`.github/workflows/ci.yml`。public リポジトリは無料) を使う。simtunnel は iOS / macOS アプリ用で対象外。リポジトリを private にした場合は GitHub Actions の代わりに Devin のセッションを使う
 - 開発マシンで実行しないもの: `npm ci` / `npm install` (`--package-lock-only` なし)、ビルド、テスト、dev サーバー、Playwright、ローカルのブラウザ (`--cdp` なしの agent-browser)。ファイルの編集・`git`・`gh`・`npm install --package-lock-only` (インストールもビルドもせず依存だけを解決する) は開発マシンで行ってよい
 - ブランチを push して PR を作ると、PR ごとに CI が動く。PR の無いブランチで動かす時: `gh workflow run ci.yml --ref <ブランチ>`
-- CI の手順が検証コマンドになる: `npm ci` → `npm run lint` → `npm run format:check` → `npm run typecheck` → `npm run build` → `npm test` → `npm run test:e2e`
+- CI の手順が検証コマンドになる: `npm ci` → `npm run lint` → `npm run format:check` → `npm run typecheck` → `npm run build` → `npm test`。E2E (`npm run test:e2e`) は PR ごとには動かさず、画面を確かめる時に `gh workflow run e2e.yml --ref <ブランチ>` で起動する (`.github/workflows/e2e.yml`。E2E を PR の必須チェックにしない方針は bannzai/castle の setup-ci skill)
 - 引数なしの `make` は、人が手で動作確認するための入口で、ビルドしてサーバーを起動し http://127.0.0.1:7878 をブラウザで開く (`Makefile` の `web`)。検査・テストは含めず CI が行う。agent は開発マシンで実行しない
 - 結果を待って読む: `gh pr checks <PR> --watch`。失敗は `gh run view <run ID> --log-failed`
-- 画面の確認: E2E の job が Playwright の出力 (スクリーンショットを含む) を `e2e-screenshots` artifact として上げる。`gh run download <run ID> -n e2e-screenshots -D ./tmp/e2e-screenshots-<run ID>` で取得し、PNG を Read して画面を判断する
+- 画面の確認: dispatch で起動した E2E の run が Playwright の出力 (スクリーンショットを含む) を `e2e-screenshots` artifact として上げる。`gh run download <run ID> -n e2e-screenshots -D ./tmp/e2e-screenshots-<run ID>` で取得し、PNG を Read して画面を判断する
 - 画面の振る舞いを足す時は、`e2e/tests/` の E2E テストでその画面を操作し、`testInfo.outputPath(...)` にスクリーンショットを保存する。そのスクリーンショットが変更の証拠になる
 - CI には本物のセッションのログが無い。テストと E2E は、ログのルートを差し替える環境変数を通して `fixtures/` の合成セッションを読む (`.claude/rules/synthetic-fixtures.md`)
 - テストではなく手で画面を操作して確かめたい時は、GitHub Actions の runner 上の Chromium を操作する `webtunnel` skill を使う。`WEBTUNNEL_REPO=bannzai/agent-timeline` でセッションを起動すると、runner が `npm run start:fixtures` で `fixtures/` の合成セッションを表示したアプリを起動する (`.github/workflows/browser-session.yml`)。public リポジトリでは録画とスクリーンショットの artifact が公開されるため、本物のセッションを表示しない
